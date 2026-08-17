@@ -1,29 +1,32 @@
 # Makefile - Build du noyau RTOS
+
 CC = i686-elf-gcc
 AS = nasm
 LD = i686-elf-gcc
+
 CFLAGS = -std=gnu11 -ffreestanding -O2 -Wall -Wextra
 LDFLAGS = -ffreestanding -O2 -nostdlib -lgcc
+
 BUILD_DIR = build
 ISO_DIR = isodir
+
 KERNEL = $(BUILD_DIR)/kernel.bin
 ISO = rtos.iso
 
 OBJS = $(BUILD_DIR)/boot.o \
- $(BUILD_DIR)/gdt_flush.o \
- $(BUILD_DIR)/gdt.o \
- $(BUILD_DIR)/interrupts.o \
- $(BUILD_DIR)/idt.o \
- $(BUILD_DIR)/timer.o \
- $(BUILD_DIR)/task.o \
- $(BUILD_DIR)/keyboard.o \
- $(BUILD_DIR)/shell.o \
- $(BUILD_DIR)/mutex.o \
- $(BUILD_DIR)/queue.o \
- $(BUILD_DIR)/heap.o \
- $(BUILD_DIR)/vfs.o \
- $(BUILD_DIR)/syscall.o \
- $(BUILD_DIR)/kernel.o
+       $(BUILD_DIR)/gdt_flush.o \
+       $(BUILD_DIR)/gdt.o \
+       $(BUILD_DIR)/interrupts.o \
+       $(BUILD_DIR)/idt.o \
+       $(BUILD_DIR)/timer.o \
+       $(BUILD_DIR)/task.o \
+       $(BUILD_DIR)/keyboard.o \
+       $(BUILD_DIR)/shell.o \
+       $(BUILD_DIR)/mutex.o \
+       $(BUILD_DIR)/queue.o \
+       $(BUILD_DIR)/heap.o \
+       $(BUILD_DIR)/vfs.o \
+       $(BUILD_DIR)/kernel.o
 
 .PHONY: all clean run iso
 
@@ -71,9 +74,6 @@ $(BUILD_DIR)/heap.o: heap.c | $(BUILD_DIR)
 $(BUILD_DIR)/vfs.o: vfs.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c vfs.c -o $(BUILD_DIR)/vfs.o
 
-$(BUILD_DIR)/syscall.o: syscall.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c syscall.c -o $(BUILD_DIR)/syscall.o
-
 $(BUILD_DIR)/kernel.o: kernel.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c kernel.c -o $(BUILD_DIR)/kernel.o
 
@@ -87,7 +87,7 @@ iso: $(KERNEL)
 	mkdir -p $(ISO_DIR)/boot/grub
 	cp $(KERNEL) $(ISO_DIR)/boot/kernel.bin
 	echo 'menuentry "RTOS" {' > $(ISO_DIR)/boot/grub/grub.cfg
-	echo ' multiboot /boot/kernel.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
+	echo '  multiboot /boot/kernel.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
 	echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
 	grub-mkrescue -o $(ISO) $(ISO_DIR)
 
