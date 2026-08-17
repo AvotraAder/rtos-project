@@ -1,0 +1,51 @@
+# Makefile - Build du noyau RTOS
+
+CC = i686-elf-gcc
+AS = nasm
+LD = i686-elf-gcc
+
+CFLAGS = -std=gnu11 -ffreestanding -O2 -Wall -Wextra
+LDFLAGS = -ffreestanding -O2 -nostdlib -lgcc
+
+BUILD_DIR = build
+ISO_DIR = isodir
+
+KERNEL = $(BUILD_DIR)/kernel.bin
+ISO = rtos.iso
+
+OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/kernel.o
+
+.PHONY: all clean run iso
+
+all: $(KERNEL)
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(BUILD_DIR)/boot.o: boot.s | $(BUILD_DIR)
+	$(AS) -f elf32 boot.s -o $(BUILD_DIR)/boot.o
+
+$(BUILD_DIR)/kernel.o: kernel.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c kernel.c -o $(BUILD_DIR)/kernel.o
+
+$(KERNEL): $(OBJS) linker.ld
+	$(LD) -T linker.ld -o $(KERNEL) $(LDFLAGS) $(OBJS)
+
+# Lancer directement le binaire dans QEMU (rapide, pour développement)
+run: $(KERNEL)
+	qemu-system-i386 -kernel $(KERNEL)
+
+# Créer une image ISO bootable avec GRUB (plus proche d'un vrai boot)
+iso: $(KERNEL)
+	mkdir -p $(ISO_DIR)/boot/grub
+	cp $(KERNEL) $(ISO_DIR)/boot/kernel.bin
+	echo 'menuentry "RTOS" {' > $(ISO_DIR)/boot/grub/grub.cfg
+	echo '  multiboot /boot/kernel.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
+	echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
+	grub-mkrescue -o $(ISO) $(ISO_DIR)
+
+run-iso: iso
+	qemu-system-i386 -cdrom $(ISO)
+
+clean:
+	rm -rf $(BUILD_DIR) $(ISO_DIR) $(ISO)

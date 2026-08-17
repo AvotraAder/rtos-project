@@ -1,0 +1,130 @@
+#include <stdint.h>
+#include <stddef.h>
+#include "gdt.h"
+#include "idt.h"
+#include "timer.h"
+#include "task.h"
+#include "keyboard.h"
+#include "shell.h"
+
+static uint16_t* const VGA_BUFFER = (uint16_t*) 0xB8000;
+static const int VGA_WIDTH = 80;
+static const int VGA_HEIGHT = 25;
+static const uint8_t VGA_COLOR = 0x0F;
+
+static int term_col = 0;
+static int term_row = 5;
+
+static inline uint16_t vga_entry(char c, uint8_t color) {
+    return (uint16_t) c | (uint16_t) color << 8;
+}
+
+void terminal_clear(void) {
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            VGA_BUFFER[y * VGA_WIDTH + x] = vga_entry(' ', VGA_COLOR);
+        }
+    }
+    term_col = 0;
+    term_row = 5;
+}
+
+void terminal_write_at(const char* str, int row, int col) {
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(str[i], VGA_COLOR);
+    }
+}
+
+static void scroll(void) {
+    if (term_row >= VGA_HEIGHT) {
+        for (int y = 5; y < VGA_HEIGHT - 1; y++) {
+            for (int x = 0; x < VGA_WIDTH; x++) {
+                VGA_BUFFER[y * VGA_WIDTH + x] = VGA_BUFFER[(y + 1) * VGA_WIDTH + x];
+            }
+        }
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            VGA_BUFFER[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = vga_entry(' ', VGA_COLOR);
+        }
+        term_row = VGA_HEIGHT - 1;
+    }
+}
+
+void terminal_putchar(char c) {
+    if (c == '\n') {
+        term_col = 0;
+        term_row++;
+        scroll();
+    } else if (c == '\b') {
+        if (term_col > 0) {
+            term_col--;
+            VGA_BUFFER[term_row * VGA_WIDTH + term_col] = vga_entry(' ', VGA_COLOR);
+        }
+    } else {
+        VGA_BUFFER[term_row * VGA_WIDTH + term_col] = vga_entry(c, VGA_COLOR);
+        term_col++;
+        if (term_col >= VGA_WIDTH) {
+            term_col = 0;
+            term_row++;
+            scroll();
+        }
+    }
+}
+
+void terminal_write_dec(uint32_t n, int row, int col) {
+    if (n == 0) {
+        VGA_BUFFER[row * VGA_WIDTH + col] = vga_entry('0', VGA_COLOR);
+        VGA_BUFFER[row * VGA_WIDTH + col + 1] = vga_entry(' ', VGA_COLOR);
+        return;
+    }
+    char buf[32];
+    int i = 0;
+    while (n > 0) {
+        buf[i++] = '0' + (n % 10);
+        n /= 10;
+    }
+    for (int j = 0; j < i; j++) {
+        VGA_BUFFER[row * VGA_WIDTH + col + j] = vga_entry(buf[i - 1 - j], VGA_COLOR);
+    }
+    VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(' ', VGA_COLOR);
+}
+
+void task_a(void) {
+    uint32_t count = 0;
+    while (1) {
+        terminal_write_at("Task A (Exec in parallel) : ", 2, 0);
+        terminal_write_dec(count++, 2, 30);
+        for (volatile int i = 0; i < 1000000; i++);
+    }
+}
+
+void task_b(void) {
+    uint32_t count = 0;
+    while (1) {
+        terminal_write_at("Task B (Exec in parallel) : ", 3, 0);
+        terminal_write_dec(count++, 3, 30);
+        for (volatile int i = 0; i < 1000000; i++);
+    }
+}
+
+void kernel_main(void) {
+    terminal_clear();
+
+    init_gdt();
+    init_idt();
+    init_timer(100);
+    init_keyboard();
+
+    init_tasking();
+    create_task(task_a);
+    create_task(task_b);
+
+    terminal_write_at("--- RTOS Preemptive Multitasking + Interactive Shell ---", 0, 0);
+
+    init_shell();
+
+    __asm__ __volatile__("sti");
+
+    while (1) {
+        __asm__ __volatile__ ("hlt");
+    }
+}

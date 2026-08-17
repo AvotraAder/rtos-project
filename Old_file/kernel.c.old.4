@@ -1,0 +1,73 @@
+#include <stdint.h>
+#include <stddef.h>
+#include "gdt.h"
+#include "idt.h"
+#include "timer.h"
+
+static uint16_t* const VGA_BUFFER = (uint16_t*) 0xB8000;
+static const int VGA_WIDTH = 80;
+static const int VGA_HEIGHT = 25;
+static const uint8_t VGA_COLOR = 0x0F;
+
+static inline uint16_t vga_entry(char c, uint8_t color) {
+    return (uint16_t) c | (uint16_t) color << 8;
+}
+
+void terminal_clear(void) {
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            VGA_BUFFER[y * VGA_WIDTH + x] = vga_entry(' ', VGA_COLOR);
+        }
+    }
+}
+
+void terminal_write_at(const char* str, int row, int col) {
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(str[i], VGA_COLOR);
+    }
+}
+
+/* Helper simple pour afficher un nombre entier */
+void terminal_write_dec(uint32_t n, int row, int col) {
+    if (n == 0) {
+        VGA_BUFFER[row * VGA_WIDTH + col] = vga_entry('0', VGA_COLOR);
+        VGA_BUFFER[row * VGA_WIDTH + col + 1] = vga_entry(' ', VGA_COLOR);
+        return;
+    }
+
+    char buf[32];
+    int i = 0;
+    while (n > 0) {
+        buf[i++] = '0' + (n % 10);
+        n /= 10;
+    }
+
+    for (int j = 0; j < i; j++) {
+        VGA_BUFFER[row * VGA_WIDTH + col + j] = vga_entry(buf[i - 1 - j], VGA_COLOR);
+    }
+    VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(' ', VGA_COLOR);
+}
+
+void kernel_main(void) {
+    terminal_clear();
+    terminal_write_at("RTOS Kernel v0.1 - Boot successful!", 0, 0);
+
+    init_gdt();
+    terminal_write_at("GDT chargee.", 1, 0);
+
+    init_idt();
+    terminal_write_at("IDT chargee et PIC remappe.", 2, 0);
+
+    /* Initialisation du PIT à 100 Hz (1 tick toutes les 10 ms) */
+    init_timer(100);
+    terminal_write_at("PIT Timer initialise a 100Hz.", 3, 0);
+
+    __asm__ __volatile__("sti");
+    terminal_write_at("Ticks horloge : ", 5, 0);
+
+    while (1) {
+        /* Affiche en continu la valeur des ticks */
+        terminal_write_dec(get_ticks(), 5, 17);
+        __asm__ __volatile__ ("hlt");
+    }
+}

@@ -1,0 +1,88 @@
+#include "task.h"
+
+static task_t main_task;
+static task_t* current_task = &main_task;
+static uint32_t next_pid = 1;
+
+void init_tasking(void) {
+    main_task.id = 0;
+    main_task.esp = 0;
+    main_task.state = TASK_READY;
+    main_task.sleep_ticks = 0;
+    main_task.next = &main_task;
+    current_task = &main_task;
+}
+
+void create_task(void (*entry)(void)) {
+    static task_t task_pool[5];
+    static int pool_index = 0;
+
+    task_t* new_task = &task_pool[pool_index++];
+    new_task->id = next_pid++;
+    new_task->state = TASK_READY;
+    new_task->sleep_ticks = 0;
+
+    uint32_t* stack_ptr = (uint32_t*)(new_task->stack + 4096);
+
+    *(--stack_ptr) = 0x0202;          /* EFLAGS (Interrupts actives) */
+    *(--stack_ptr) = 0x08;            /* CS */
+    *(--stack_ptr) = (uint32_t)entry; /* EIP */
+
+    *(--stack_ptr) = 0;               /* Code d'erreur factice */
+    *(--stack_ptr) = 32;              /* Numéro d'interruption */
+
+    for (int i = 0; i < 8; i++) {
+        *(--stack_ptr) = 0;           /* Registres pusha */
+    }
+
+    *(--stack_ptr) = 0x10;            /* DS */
+
+    new_task->esp = (uint32_t)stack_ptr;
+
+    new_task->next = current_task->next;
+    current_task->next = new_task;
+}
+
+void task_sleep(uint32_t ticks) {
+    if (ticks == 0) return;
+
+    current_task->sleep_ticks = ticks;
+    current_task->state = TASK_SLEEPING;
+
+    /* Déclenche immédiatement une préemption */
+    __asm__ __volatile__ ("int $32");
+}
+
+uint32_t schedule(uint32_t current_esp) {
+    if (!current_task) return current_esp;
+
+    current_task->esp = current_esp;
+
+    /* Mise à jour des compteurs de sommeil de toutes les tâches */
+    task_t* t = current_task;
+    do {
+        if (t->state == TASK_SLEEPING) {
+            if (t->sleep_ticks > 0) {
+                t->sleep_ticks--;
+            }
+            if (t->sleep_ticks == 0) {
+                t->state = TASK_READY;
+            }
+        }
+        t = t->next;
+    } while (t != current_task);
+
+    /* Recherche de la prochaine tâche prête (TASK_READY) */
+    task_t* next_task = current_task->next;
+    while (next_task->state != TASK_READY) {
+        next_task = next_task->next;
+        if (next_task == current_task) break;
+    }
+
+    current_task = next_task;
+    return current_task->esp;
+}
+
+task_t* get_current_task(void) {
+    return current_task;
+}

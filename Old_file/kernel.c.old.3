@@ -1,0 +1,48 @@
+#include <stdint.h>
+#include <stddef.h>
+#include "gdt.h"
+#include "idt.h"
+
+static uint16_t* const VGA_BUFFER = (uint16_t*) 0xB8000;
+static const int VGA_WIDTH = 80;
+static const int VGA_HEIGHT = 25;
+static const uint8_t VGA_COLOR = 0x0F;
+
+static inline uint16_t vga_entry(char c, uint8_t color) {
+    return (uint16_t) c | (uint16_t) color << 8;
+}
+
+void terminal_clear(void) {
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            VGA_BUFFER[y * VGA_WIDTH + x] = vga_entry(' ', VGA_COLOR);
+        }
+    }
+}
+
+void terminal_write_at(const char* str, int row, int col) {
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(str[i], VGA_COLOR);
+    }
+}
+
+void kernel_main(void) {
+    terminal_clear();
+    terminal_write_at("RTOS Kernel v0.1 - Boot successful!", 0, 0);
+
+    /* Initialisation GDT */
+    init_gdt();
+    terminal_write_at("GDT chargee et segments mis a jour.", 1, 0);
+
+    /* Initialisation IDT */
+    init_idt();
+    terminal_write_at("IDT chargee et PIC remappe.", 2, 0);
+
+    /* Activation des interruptions processeur */
+    __asm__ __volatile__("sti");
+    terminal_write_at("Interruptions materielles activees (STI).", 3, 0);
+
+    while (1) {
+        __asm__ __volatile__ ("hlt");
+    }
+}

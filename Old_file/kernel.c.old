@@ -1,0 +1,41 @@
+/* kernel.c - Noyau minimal : affiche un message en mode texte VGA */
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* Mémoire vidéo VGA en mode texte 80x25, adresse physique fixe */
+static uint16_t* const VGA_BUFFER = (uint16_t*) 0xB8000;
+static const int VGA_WIDTH = 80;
+static const int VGA_HEIGHT = 25;
+
+/* Couleur : texte blanc sur fond noir */
+static const uint8_t VGA_COLOR = 0x0F;
+
+static inline uint16_t vga_entry(char c, uint8_t color) {
+    return (uint16_t) c | (uint16_t) color << 8;
+}
+
+void terminal_clear(void) {
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            VGA_BUFFER[y * VGA_WIDTH + x] = vga_entry(' ', VGA_COLOR);
+        }
+    }
+}
+
+void terminal_write_at(const char* str, int row, int col) {
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(str[i], VGA_COLOR);
+    }
+}
+
+void kernel_main(void) {
+    terminal_clear();
+    terminal_write_at("RTOS Kernel v0.1 - Boot successful!", 0, 0);
+    terminal_write_at("Environnement de dev operationnel.", 1, 0);
+
+    /* Le noyau ne doit jamais retourner : boucle infinie */
+    while (1) {
+        __asm__ __volatile__ ("hlt");
+    }
+}
