@@ -1,7 +1,8 @@
+# Makefile - Build du noyau RTOS
 CC = i686-elf-gcc
 AS = nasm
 LD = i686-elf-gcc
-CFLAGS = -std=gnu11 -ffreestanding -O2 -g -Wall -Wextra
+CFLAGS = -std=gnu11 -ffreestanding -O2 -Wall -Wextra
 LDFLAGS = -ffreestanding -O2 -nostdlib -lgcc
 BUILD_DIR = build
 ISO_DIR = isodir
@@ -9,24 +10,20 @@ KERNEL = $(BUILD_DIR)/kernel.bin
 ISO = rtos.iso
 
 OBJS = $(BUILD_DIR)/boot.o \
-	$(BUILD_DIR)/gdt_flush.o \
-	$(BUILD_DIR)/gdt.o \
-	$(BUILD_DIR)/interrupts.o \
-	$(BUILD_DIR)/idt.o \
-	$(BUILD_DIR)/timer.o \
-	$(BUILD_DIR)/task.o \
-	$(BUILD_DIR)/keyboard.o \
-	$(BUILD_DIR)/shell.o \
-	$(BUILD_DIR)/mutex.o \
-	$(BUILD_DIR)/queue.o \
-	$(BUILD_DIR)/sema.o \
-	$(BUILD_DIR)/heap.o \
-	$(BUILD_DIR)/vfs.o \
-	$(BUILD_DIR)/syscall.o \
-	$(BUILD_DIR)/serial.o \
-	$(BUILD_DIR)/klog.o \
-	$(BUILD_DIR)/panic.o \
-	$(BUILD_DIR)/kernel.o
+ $(BUILD_DIR)/gdt_flush.o \
+ $(BUILD_DIR)/gdt.o \
+ $(BUILD_DIR)/interrupts.o \
+ $(BUILD_DIR)/idt.o \
+ $(BUILD_DIR)/timer.o \
+ $(BUILD_DIR)/task.o \
+ $(BUILD_DIR)/keyboard.o \
+ $(BUILD_DIR)/shell.o \
+ $(BUILD_DIR)/mutex.o \
+ $(BUILD_DIR)/queue.o \
+ $(BUILD_DIR)/heap.o \
+ $(BUILD_DIR)/vfs.o \
+ $(BUILD_DIR)/syscall.o \
+ $(BUILD_DIR)/kernel.o
 
 .PHONY: all clean run iso
 
@@ -68,9 +65,6 @@ $(BUILD_DIR)/mutex.o: mutex.c | $(BUILD_DIR)
 $(BUILD_DIR)/queue.o: queue.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c queue.c -o $(BUILD_DIR)/queue.o
 
-$(BUILD_DIR)/sema.o: sema.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c sema.c -o $(BUILD_DIR)/sema.o
-
 $(BUILD_DIR)/heap.o: heap.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c heap.c -o $(BUILD_DIR)/heap.o
 
@@ -80,15 +74,6 @@ $(BUILD_DIR)/vfs.o: vfs.c | $(BUILD_DIR)
 $(BUILD_DIR)/syscall.o: syscall.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c syscall.c -o $(BUILD_DIR)/syscall.o
 
-$(BUILD_DIR)/serial.o: serial.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c serial.c -o $(BUILD_DIR)/serial.o
-
-$(BUILD_DIR)/klog.o: klog.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c klog.c -o $(BUILD_DIR)/klog.o
-
-$(BUILD_DIR)/panic.o: panic.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c panic.c -o $(BUILD_DIR)/panic.o
-
 $(BUILD_DIR)/kernel.o: kernel.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c kernel.c -o $(BUILD_DIR)/kernel.o
 
@@ -96,7 +81,7 @@ $(KERNEL): $(OBJS) linker.ld
 	$(LD) -T linker.ld -o $(KERNEL) $(LDFLAGS) $(OBJS)
 
 run: $(KERNEL)
-	qemu-system-i386 -kernel $(KERNEL) -serial stdio
+	qemu-system-i386 -kernel $(KERNEL)
 
 iso: $(KERNEL)
 	mkdir -p $(ISO_DIR)/boot/grub
@@ -107,7 +92,7 @@ iso: $(KERNEL)
 	grub-mkrescue -o $(ISO) $(ISO_DIR)
 
 run-iso: iso
-	qemu-system-i386 -cdrom $(ISO) -serial stdio
+	qemu-system-i386 -cdrom $(ISO)
 
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR) $(ISO)
