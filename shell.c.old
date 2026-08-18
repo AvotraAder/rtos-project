@@ -1,7 +1,7 @@
 /*
 ================================================================================
 FICHIER: shell.c
-VERSION: 2.1 - Warnings corrigés
+VERSION: 2.1 - Avec historique commandes et support scroll
 ================================================================================
 */
 
@@ -26,6 +26,7 @@ extern int  terminal_get_view_offset(void);
 #define MAX_ARGS    8
 #define ARG_LEN     32
 
+/* NOUVEAU: Historique des commandes */
 #define HISTORY_SIZE 20
 static char command_history[HISTORY_SIZE][MAX_BUFFER];
 static int  history_count = 0;
@@ -37,6 +38,9 @@ static char  buffer[MAX_BUFFER];
 static int   buf_idx        = 0;
 static void* test_alloc_ptr = 0;
 
+/* ============================================================================
+   Fonctions utilitaires
+   ============================================================================ */
 static int sh_strcmp(const char* a, const char* b)
 {
     while (*a && (*a == *b)) { a++; b++; }
@@ -63,12 +67,8 @@ static void print_str(const char* s)
 static void print_dec(uint32_t n)
 {
     if (n == 0) { terminal_putchar('0'); return; }
-    char buf[16]; 
-    int i = 0;
-    while (n > 0) { 
-        buf[i++] = '0' + (n % 10); 
-        n /= 10; 
-    }
+    char buf[16]; int i = 0;
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
     for (int j = i - 1; j >= 0; j--) terminal_putchar(buf[j]);
 }
 
@@ -98,6 +98,9 @@ static int split_args(char* cmd, char args[MAX_ARGS][ARG_LEN], int* argc)
     return *argc;
 }
 
+/* ============================================================================
+   Gestion de l'historique
+   ============================================================================ */
 static void history_add(const char* cmd)
 {
     if (sh_strlen(cmd) == 0) return;
@@ -171,6 +174,9 @@ void shell_history_down(void)
     display_buffer();
 }
 
+/* ============================================================================
+   Commandes
+   ============================================================================ */
 static void cmd_help(void)
 {
     print_str("\n=== RTOS Shell v2.1 ===\n");
@@ -229,8 +235,7 @@ static void cmd_history(void)
 static void cmd_uptime(void)
 {
     uint32_t s = get_uptime_sec();
-    uint32_t m = s / 60;
-    uint32_t h = m / 60;
+    uint32_t m = s / 60, h = m / 60;
     print_str("\nUptime : ");
     print_dec(h); print_str("h ");
     print_dec(m % 60); print_str("m ");
@@ -250,20 +255,13 @@ static void cmd_tasks(void)
         print_dec(cur->priority);  print_str("    ");
         print_dec(cur->cpu_ticks); print_str("   ");
         switch (cur->state) {
-            case TASK_READY:    
-                print_str("READY\n"); 
-                break;
+            case TASK_READY:    print_str("READY\n"); break;
             case TASK_SLEEPING:
                 print_str("SLEEP(");
                 print_dec(cur->sleep_ticks);
-                print_str(")\n"); 
-                break;
-            case TASK_BLOCKED:  
-                print_str("BLOCKED\n"); 
-                break;
-            case TASK_ZOMBIE:   
-                print_str("ZOMBIE\n"); 
-                break;
+                print_str(")\n"); break;
+            case TASK_BLOCKED:  print_str("BLOCKED\n"); break;
+            case TASK_ZOMBIE:   print_str("ZOMBIE\n"); break;
         }
         cur = cur->next;
     } while (cur != start);
@@ -286,9 +284,8 @@ static void cmd_mem(void)
     print_str("  Libre    : "); print_dec((uint32_t)avail); print_str(" octets\n");
     uint32_t pct = total ? (uint32_t)(used * 40 / total) : 0;
     print_str("  [");
-    for (uint32_t i = 0; i < 40; i++) {
+    for (uint32_t i = 0; i < 40; i++)
         terminal_putchar(i < pct ? '#' : '.');
-    }
     print_str("] ");
     print_dec(total ? (uint32_t)(used * 100 / total) : 0);
     print_str("%");
@@ -297,15 +294,13 @@ static void cmd_mem(void)
 static void cmd_alloc(int argc, char args[MAX_ARGS][ARG_LEN])
 {
     if (test_alloc_ptr) {
-        print_str("\nDeja alloue ! Faites 'free' d'abord."); 
-        return;
+        print_str("\nDeja alloue ! Faites 'free' d'abord."); return;
     }
     uint32_t sz = 1024;
     if (argc >= 2) {
         sz = 0;
-        for (int i = 0; args[1][i] >= '0' && args[1][i] <= '9'; i++) {
+        for (int i = 0; args[1][i] >= '0' && args[1][i] <= '9'; i++)
             sz = sz * 10 + (args[1][i] - '0');
-        }
         if (sz == 0) sz = 1024;
     }
     test_alloc_ptr = kmalloc(sz);
@@ -319,24 +314,16 @@ static void cmd_alloc(int argc, char args[MAX_ARGS][ARG_LEN])
 
 static void cmd_hexdump(const char* addr_str)
 {
-    uint32_t addr = 0;
-    const char* p = addr_str;
-    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-        p += 2;
-    }
+    uint32_t    addr = 0;
+    const char* p    = addr_str;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
     while (*p) {
         uint8_t nib;
-        if (*p >= '0' && *p <= '9') {
-            nib = *p - '0';
-        } else if (*p >= 'a' && *p <= 'f') {
-            nib = *p - 'a' + 10;
-        } else if (*p >= 'A' && *p <= 'F') {
-            nib = *p - 'A' + 10;
-        } else {
-            break;
-        }
-        addr = (addr << 4) | nib; 
-        p++;
+        if      (*p >= '0' && *p <= '9') nib = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') nib = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') nib = *p - 'A' + 10;
+        else break;
+        addr = (addr << 4) | nib; p++;
     }
     print_str("\nHexdump @ "); print_hex(addr); print_str(" :\n");
     uint8_t* mem = (uint8_t*)addr;
@@ -361,67 +348,27 @@ static void cmd_hexdump(const char* addr_str)
 static void cmd_calc(int argc, char args[MAX_ARGS][ARG_LEN])
 {
     if (argc < 4) {
-        print_str("\nUsage: calc <n> <op> <m>"); 
-        return;
+        print_str("\nUsage: calc <n> <op> <m>"); return;
     }
-    
-    int32_t a = 0, b = 0; 
-    int na = 0, nb = 0;
-    const char* pa = args[1]; 
-    const char* pb = args[3];
-    
-    if (*pa == '-') { 
-        na = 1; 
-        pa++; 
-    }
-    if (*pb == '-') { 
-        nb = 1; 
-        pb++; 
-    }
-    
-    while (*pa >= '0' && *pa <= '9') {
-        a = a * 10 + (*pa++ - '0');
-    }
-    while (*pb >= '0' && *pb <= '9') {
-        b = b * 10 + (*pb++ - '0');
-    }
-    
-    if (na) a = -a; 
-    if (nb) b = -b;
-    
-    char op = args[2][0]; 
-    int32_t res = 0; 
-    int ok = 1;
-    
+    int32_t a = 0, b = 0; int na = 0, nb = 0;
+    const char* pa = args[1]; if (*pa == '-') { na = 1; pa++; }
+    const char* pb = args[3]; if (*pb == '-') { nb = 1; pb++; }
+    while (*pa >= '0' && *pa <= '9') a = a * 10 + (*pa++ - '0');
+    while (*pb >= '0' && *pb <= '9') b = b * 10 + (*pb++ - '0');
+    if (na) a = -a; if (nb) b = -b;
+    char op = args[2][0]; int32_t res = 0; int ok = 1;
     switch (op) {
-        case '+': 
-            res = a + b; 
-            break;
-        case '-': 
-            res = a - b; 
-            break;
-        case '*': 
-            res = a * b; 
-            break;
+        case '+': res = a + b; break;
+        case '-': res = a - b; break;
+        case '*': res = a * b; break;
         case '/':
-            if (b == 0) { 
-                print_str("\nDiv/0!"); 
-                ok = 0; 
-            } else {
-                res = a / b; 
-            }
-            break;
-        default: 
-            print_str("\nOp invalide"); 
-            ok = 0;
+            if (b == 0) { print_str("\nDiv/0!"); ok = 0; }
+            else res = a / b; break;
+        default: print_str("\nOp invalide"); ok = 0;
     }
-    
     if (ok) {
         print_str("\nResultat : ");
-        if (res < 0) { 
-            terminal_putchar('-'); 
-            res = -res; 
-        }
+        if (res < 0) { terminal_putchar('-'); res = -res; }
         print_dec((uint32_t)res);
     }
 }
@@ -439,13 +386,9 @@ static void cmd_sem(void)
     sem_post(&s);
     print_str("  post()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
     int r = sem_trywait(&s);
-    print_str("  trywait(): "); 
-    print_str(r == 0 ? "ok" : "echec");
-    print_str(" -> "); 
-    print_dec((uint32_t)sem_value(&s)); 
-    print_str("\n");
-    sem_post(&s); 
-    sem_post(&s);
+    print_str("  trywait(): "); print_str(r == 0 ? "ok" : "echec");
+    print_str(" -> "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_post(&s); sem_post(&s);
     print_str("  2xpost() : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
 }
 
@@ -477,10 +420,8 @@ static void cmd_spawn(int argc, char args[MAX_ARGS][ARG_LEN])
     const char* name = (argc >= 2) ? args[1] : "proc";
     int pid = process_create(name, spawned_task_fn, 1, 0);
     if (pid >= 0) {
-        print_str("\nProcessus '"); 
-        print_str(name);
-        print_str("' cree, PID="); 
-        print_dec((uint32_t)pid);
+        print_str("\nProcessus '"); print_str(name);
+        print_str("' cree, PID="); print_dec((uint32_t)pid);
     } else {
         print_str("\nEchec : pool plein.");
     }
@@ -498,6 +439,9 @@ static void cmd_reboot(void)
     );
 }
 
+/* ============================================================================
+   Execution des commandes
+   ============================================================================ */
 static void execute_command(void)
 {
     buffer[buf_idx] = '\0';
@@ -506,131 +450,91 @@ static void execute_command(void)
     saved_buf_idx = 0;
     saved_buffer[0] = '\0';
     
-    if (buf_idx == 0) { 
-        print_prompt(); 
-        return; 
-    }
+    if (buf_idx == 0) { print_prompt(); return; }
 
     history_add(buffer);
 
     char args[MAX_ARGS][ARG_LEN];
-    int argc = 0;
+    int  argc = 0;
     split_args(buffer, args, &argc);
-    
-    if (argc == 0) { 
-        print_prompt(); 
-        return; 
-    }
+    if (argc == 0) { print_prompt(); return; }
 
-    if (sh_strcmp(args[0], "help") == 0) {
-        cmd_help();
-    } else if (sh_strcmp(args[0], "history") == 0) {
-        cmd_history();
-    } else if (sh_strcmp(args[0], "clear") == 0) {
+    if      (sh_strcmp(args[0], "help")    == 0) cmd_help();
+    else if (sh_strcmp(args[0], "history") == 0) cmd_history();
+    else if (sh_strcmp(args[0], "clear")   == 0) {
         terminal_clear();
         terminal_write_at("--- RTOS v2.1 | Scrollback + History ---", 0, 0);
         terminal_write_at("Task A (Producer Sent) : ", 2, 0);
         terminal_write_at("Task B (Consumer Recv) : ", 3, 0);
-    } else if (sh_strcmp(args[0], "uptime") == 0) {
-        cmd_uptime();
-    } else if (sh_strcmp(args[0], "ticks") == 0) {
-        print_str("\nTicks : "); 
-        print_dec(get_ticks());
-    } else if (sh_strcmp(args[0], "tasks") == 0) {
-        cmd_tasks();
-    } else if (sh_strcmp(args[0], "ps") == 0) {
-        cmd_ps();
-    } else if (sh_strcmp(args[0], "spawn") == 0) {
-        cmd_spawn(argc, args);
-    } else if (sh_strcmp(args[0], "mem") == 0) {
-        cmd_mem();
-    } else if (sh_strcmp(args[0], "alloc") == 0) {
-        cmd_alloc(argc, args);
-    } else if (sh_strcmp(args[0], "free") == 0) {
-        if (!test_alloc_ptr) { 
-            print_str("\nRien a liberer."); 
-        } else { 
-            kfree(test_alloc_ptr); 
-            test_alloc_ptr = 0; 
-            print_str("\nLibere."); 
-        }
-    } else if (sh_strcmp(args[0], "hexdump") == 0) {
-        if (argc < 2) {
-            print_str("\nUsage: hexdump <addr>");
-        } else {
-            cmd_hexdump(args[1]);
-        }
-    } else if (sh_strcmp(args[0], "ls") == 0) {
-        print_str("\nFichiers VFS:\n"); 
-        vfs_list(print_str);
-    } else if (sh_strcmp(args[0], "cat") == 0) {
-        if (argc < 2) {
-            print_str("\nUsage: cat <fichier>");
-        } else {
+    }
+    else if (sh_strcmp(args[0], "uptime")  == 0) cmd_uptime();
+    else if (sh_strcmp(args[0], "ticks")   == 0) {
+        print_str("\nTicks : "); print_dec(get_ticks());
+    }
+    else if (sh_strcmp(args[0], "tasks")   == 0) cmd_tasks();
+    else if (sh_strcmp(args[0], "ps")      == 0) cmd_ps();
+    else if (sh_strcmp(args[0], "spawn")   == 0) cmd_spawn(argc, args);
+    else if (sh_strcmp(args[0], "mem")     == 0) cmd_mem();
+    else if (sh_strcmp(args[0], "alloc")   == 0) cmd_alloc(argc, args);
+    else if (sh_strcmp(args[0], "free")    == 0) {
+        if (!test_alloc_ptr) { print_str("\nRien a liberer."); }
+        else { kfree(test_alloc_ptr); test_alloc_ptr = 0; print_str("\nLibere."); }
+    }
+    else if (sh_strcmp(args[0], "hexdump") == 0) {
+        if (argc < 2) print_str("\nUsage: hexdump <addr>");
+        else cmd_hexdump(args[1]);
+    }
+    else if (sh_strcmp(args[0], "ls")      == 0) {
+        print_str("\nFichiers VFS:\n"); vfs_list(print_str);
+    }
+    else if (sh_strcmp(args[0], "cat")     == 0) {
+        if (argc < 2) print_str("\nUsage: cat <fichier>");
+        else {
             vfs_file_t* f = vfs_open(args[1]);
-            if (f) { 
-                print_str("\n"); 
-                print_str(f->content); 
-            } else { 
-                print_str("\nIntrouvable: "); 
-                print_str(args[1]); 
-            }
+            if (f) { print_str("\n"); print_str(f->content); }
+            else   { print_str("\nIntrouvable: "); print_str(args[1]); }
         }
-    } else if (sh_strcmp(args[0], "touch") == 0) {
-        if (argc < 2) {
-            print_str("\nUsage: touch <fichier>");
-        } else if (vfs_touch(args[1]) == 0) {
-            print_str("\nCree: "); 
-            print_str(args[1]);
-        } else {
-            print_str("\nEchec.");
-        }
-    } else if (sh_strcmp(args[0], "write") == 0) {
-        if (argc < 3) {
-            print_str("\nUsage: write <fichier> <texte>");
-        } else {
-            char content[MAX_BUFFER]; 
-            int ci = 0;
+    }
+    else if (sh_strcmp(args[0], "touch")   == 0) {
+        if (argc < 2) print_str("\nUsage: touch <fichier>");
+        else if (vfs_touch(args[1]) == 0) {
+            print_str("\nCree: "); print_str(args[1]);
+        } else print_str("\nEchec.");
+    }
+    else if (sh_strcmp(args[0], "write")   == 0) {
+        if (argc < 3) print_str("\nUsage: write <fichier> <texte>");
+        else {
+            char content[MAX_BUFFER]; int ci = 0;
             for (int a = 2; a < argc && ci < MAX_BUFFER - 2; a++) {
-                for (int k = 0; args[a][k] && ci < MAX_BUFFER - 2; k++) {
+                for (int k = 0; args[a][k] && ci < MAX_BUFFER - 2; k++)
                     content[ci++] = args[a][k];
-                }
                 if (a < argc - 1) content[ci++] = ' ';
             }
             content[ci] = '\0';
             if (vfs_write(args[1], content) == 0) {
-                print_str("\nEcrit dans "); 
-                print_str(args[1]);
-            } else {
-                print_str("\nEchec.");
-            }
+                print_str("\nEcrit dans "); print_str(args[1]);
+            } else print_str("\nEchec.");
         }
-    } else if (sh_strcmp(args[0], "rm") == 0) {
-        if (argc < 2) {
-            print_str("\nUsage: rm <fichier>");
-        } else if (vfs_remove(args[1]) == 0) {
-            print_str("\nSupprime: "); 
-            print_str(args[1]);
-        } else {
-            print_str("\nIntrouvable.");
-        }
-    } else if (sh_strcmp(args[0], "echo") == 0) {
+    }
+    else if (sh_strcmp(args[0], "rm")      == 0) {
+        if (argc < 2) print_str("\nUsage: rm <fichier>");
+        else if (vfs_remove(args[1]) == 0) {
+            print_str("\nSupprime: "); print_str(args[1]);
+        } else print_str("\nIntrouvable.");
+    }
+    else if (sh_strcmp(args[0], "echo")    == 0) {
         print_str("\n");
         for (int a = 1; a < argc; a++) {
             print_str(args[a]);
             if (a < argc - 1) terminal_putchar(' ');
         }
-    } else if (sh_strcmp(args[0], "calc") == 0) {
-        cmd_calc(argc, args);
-    } else if (sh_strcmp(args[0], "sem") == 0) {
-        cmd_sem();
-    } else if (sh_strcmp(args[0], "sys") == 0) {
-        cmd_sys();
-    } else if (sh_strcmp(args[0], "reboot") == 0) {
-        cmd_reboot();
-    } else {
-        print_str("\nInconnu: '"); 
-        print_str(args[0]);
+    }
+    else if (sh_strcmp(args[0], "calc")    == 0) cmd_calc(argc, args);
+    else if (sh_strcmp(args[0], "sem")     == 0) cmd_sem();
+    else if (sh_strcmp(args[0], "sys")     == 0) cmd_sys();
+    else if (sh_strcmp(args[0], "reboot")  == 0) cmd_reboot();
+    else {
+        print_str("\nInconnu: '"); print_str(args[0]);
         print_str("'  (tapez 'help')");
     }
 
@@ -638,6 +542,9 @@ static void execute_command(void)
     print_prompt();
 }
 
+/* ============================================================================
+   Interface publique
+   ============================================================================ */
 void init_shell(void)
 {
     buf_idx = 0;
