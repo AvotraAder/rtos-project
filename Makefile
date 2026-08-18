@@ -1,113 +1,84 @@
-CC = i686-elf-gcc
-AS = nasm
-LD = i686-elf-gcc
-CFLAGS = -std=gnu11 -ffreestanding -O2 -g -Wall -Wextra
+# ── Makefile - RTOS x86 v2.0 ─────────────────────────────────────
+CC      = i686-elf-gcc
+AS      = nasm
+LD      = i686-elf-gcc
+
+CFLAGS  = -std=gnu11 -ffreestanding -O2 -Wall -Wextra \
+          -Wno-unused-parameter -fno-stack-protector
 LDFLAGS = -ffreestanding -O2 -nostdlib -lgcc
-BUILD_DIR = build
+
+BUILD   = build
 ISO_DIR = isodir
-KERNEL = $(BUILD_DIR)/kernel.bin
-ISO = rtos.iso
+KERNEL  = $(BUILD)/kernel.bin
+ISO     = rtos.iso
 
-OBJS = $(BUILD_DIR)/boot.o \
-	$(BUILD_DIR)/gdt_flush.o \
-	$(BUILD_DIR)/gdt.o \
-	$(BUILD_DIR)/interrupts.o \
-	$(BUILD_DIR)/idt.o \
-	$(BUILD_DIR)/timer.o \
-	$(BUILD_DIR)/task.o \
-	$(BUILD_DIR)/keyboard.o \
-	$(BUILD_DIR)/shell.o \
-	$(BUILD_DIR)/mutex.o \
-	$(BUILD_DIR)/queue.o \
-	$(BUILD_DIR)/sema.o \
-	$(BUILD_DIR)/heap.o \
-	$(BUILD_DIR)/vfs.o \
-	$(BUILD_DIR)/syscall.o \
-	$(BUILD_DIR)/serial.o \
-	$(BUILD_DIR)/klog.o \
-	$(BUILD_DIR)/panic.o \
-	$(BUILD_DIR)/kernel.o
+# ── Objets ────────────────────────────────────────────────────────
+OBJS =  $(BUILD)/boot.o        \
+        $(BUILD)/gdt_flush.o   \
+        $(BUILD)/interrupts.o  \
+        $(BUILD)/gdt.o         \
+        $(BUILD)/idt.o         \
+        $(BUILD)/timer.o       \
+        $(BUILD)/task.o        \
+        $(BUILD)/process.o     \
+        $(BUILD)/keyboard.o    \
+        $(BUILD)/mutex.o       \
+        $(BUILD)/semaphore.o   \
+        $(BUILD)/queue.o       \
+        $(BUILD)/heap.o        \
+        $(BUILD)/vfs.o         \
+        $(BUILD)/syscall.o     \
+        $(BUILD)/shell.o       \
+        $(BUILD)/kernel.o
 
-.PHONY: all clean run iso
+.PHONY: all clean run iso run-iso
 
+# ── Cibles principales ────────────────────────────────────────────
 all: $(KERNEL)
 
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+$(BUILD):
+	mkdir -p $(BUILD)
 
-$(BUILD_DIR)/boot.o: boot.s | $(BUILD_DIR)
-	$(AS) -f elf32 boot.s -o $(BUILD_DIR)/boot.o
+# ── Assembleur ────────────────────────────────────────────────────
+$(BUILD)/boot.o: boot.s | $(BUILD)
+	$(AS) -f elf32 $< -o $@
 
-$(BUILD_DIR)/gdt_flush.o: gdt_flush.s | $(BUILD_DIR)
-	$(AS) -f elf32 gdt_flush.s -o $(BUILD_DIR)/gdt_flush.o
+$(BUILD)/gdt_flush.o: gdt_flush.s | $(BUILD)
+	$(AS) -f elf32 $< -o $@
 
-$(BUILD_DIR)/interrupts.o: interrupts.s | $(BUILD_DIR)
-	$(AS) -f elf32 interrupts.s -o $(BUILD_DIR)/interrupts.o
+$(BUILD)/interrupts.o: interrupts.s | $(BUILD)
+	$(AS) -f elf32 $< -o $@
 
-$(BUILD_DIR)/gdt.o: gdt.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c gdt.c -o $(BUILD_DIR)/gdt.o
+# ── C ─────────────────────────────────────────────────────────────
+$(BUILD)/%.o: %.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/idt.o: idt.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c idt.c -o $(BUILD_DIR)/idt.o
-
-$(BUILD_DIR)/timer.o: timer.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c timer.c -o $(BUILD_DIR)/timer.o
-
-$(BUILD_DIR)/task.o: task.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c task.c -o $(BUILD_DIR)/task.o
-
-$(BUILD_DIR)/keyboard.o: keyboard.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c keyboard.c -o $(BUILD_DIR)/keyboard.o
-
-$(BUILD_DIR)/shell.o: shell.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c shell.c -o $(BUILD_DIR)/shell.o
-
-$(BUILD_DIR)/mutex.o: mutex.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c mutex.c -o $(BUILD_DIR)/mutex.o
-
-$(BUILD_DIR)/queue.o: queue.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c queue.c -o $(BUILD_DIR)/queue.o
-
-$(BUILD_DIR)/sema.o: sema.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c sema.c -o $(BUILD_DIR)/sema.o
-
-$(BUILD_DIR)/heap.o: heap.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c heap.c -o $(BUILD_DIR)/heap.o
-
-$(BUILD_DIR)/vfs.o: vfs.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c vfs.c -o $(BUILD_DIR)/vfs.o
-
-$(BUILD_DIR)/syscall.o: syscall.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c syscall.c -o $(BUILD_DIR)/syscall.o
-
-$(BUILD_DIR)/serial.o: serial.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c serial.c -o $(BUILD_DIR)/serial.o
-
-$(BUILD_DIR)/klog.o: klog.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c klog.c -o $(BUILD_DIR)/klog.o
-
-$(BUILD_DIR)/panic.o: panic.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c panic.c -o $(BUILD_DIR)/panic.o
-
-$(BUILD_DIR)/kernel.o: kernel.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c kernel.c -o $(BUILD_DIR)/kernel.o
-
+# ── Linkage ───────────────────────────────────────────────────────
 $(KERNEL): $(OBJS) linker.ld
-	$(LD) -T linker.ld -o $(KERNEL) $(LDFLAGS) $(OBJS)
+	$(LD) -T linker.ld -o $@ $(LDFLAGS) $(OBJS)
+	@echo ""
+	@echo "  ╔══════════════════════════════════╗"
+	@echo "  ║  RTOS kernel.bin compilé OK !    ║"
+	@echo "  ╚══════════════════════════════════╝"
+	@echo ""
 
+# ── Exécution ─────────────────────────────────────────────────────
 run: $(KERNEL)
-	qemu-system-i386 -kernel $(KERNEL) -serial stdio
+	qemu-system-i386 -kernel $(KERNEL) \
+	    -serial stdio \
+	    -m 32M
 
+# ── ISO GRUB ──────────────────────────────────────────────────────
 iso: $(KERNEL)
 	mkdir -p $(ISO_DIR)/boot/grub
 	cp $(KERNEL) $(ISO_DIR)/boot/kernel.bin
-	echo 'menuentry "RTOS" {' > $(ISO_DIR)/boot/grub/grub.cfg
-	echo ' multiboot /boot/kernel.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
-	echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
+	printf 'set timeout=0\nset default=0\n\nmenuentry "RTOS v2.0" {\n    multiboot /boot/kernel.bin\n    boot\n}\n' \
+	    > $(ISO_DIR)/boot/grub/grub.cfg
 	grub-mkrescue -o $(ISO) $(ISO_DIR)
 
 run-iso: iso
-	qemu-system-i386 -cdrom $(ISO) -serial stdio
+	qemu-system-i386 -cdrom $(ISO) -m 32M
 
+# ── Nettoyage ─────────────────────────────────────────────────────
 clean:
-	rm -rf $(BUILD_DIR) $(ISO_DIR) $(ISO)
+	rm -rf $(BUILD) $(ISO_DIR) $(ISO)

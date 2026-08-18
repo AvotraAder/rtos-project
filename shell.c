@@ -1,273 +1,587 @@
+/*
+================================================================================
+FICHIER: shell.c
+VERSION: 2.1 - Avec historique commandes et support scroll
+================================================================================
+*/
+
 #include "shell.h"
 #include "timer.h"
 #include "task.h"
 #include "heap.h"
 #include "vfs.h"
 #include "syscall.h"
-#include "klog.h"
+#include "semaphore.h"
+#include "process.h"
 #include <stdint.h>
 #include <stddef.h>
 
 extern void terminal_putchar(char c);
 extern void terminal_write_at(const char* str, int row, int col);
 extern void terminal_clear(void);
-extern void task_c(void); /* tache demo, definie dans kernel.c, lancee via "spawn" */
+extern void terminal_scroll_to_bottom(void);
+extern int  terminal_get_view_offset(void);
 
-#define MAX_BUFFER 128
-#define MAX_HISTORY 5
+#define MAX_BUFFER  128
+#define MAX_ARGS    8
+#define ARG_LEN     32
 
-static char buffer[MAX_BUFFER];
-static int buf_idx = 0;
+/* NOUVEAU: Historique des commandes */
+#define HISTORY_SIZE 20
+static char command_history[HISTORY_SIZE][MAX_BUFFER];
+static int  history_count = 0;
+static int  history_index = -1;
+static char saved_buffer[MAX_BUFFER];
+static int  saved_buf_idx = 0;
+
+static char  buffer[MAX_BUFFER];
+static int   buf_idx        = 0;
 static void* test_alloc_ptr = 0;
 
-static char history[MAX_HISTORY][MAX_BUFFER];
-static int hist_count = 0;
-static int hist_view = -1;
-
-static int strcmp(const char* s1, const char* s2) {
-    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
-    return *(unsigned char*)s1 - *(unsigned char*)s2;
+/* ============================================================================
+   Fonctions utilitaires
+   ============================================================================ */
+static int sh_strcmp(const char* a, const char* b)
+{
+    while (*a && (*a == *b)) { a++; b++; }
+    return *(unsigned char*)a - *(unsigned char*)b;
 }
 
-static int strncmp(const char* s1, const char* s2, size_t n) {
-    while (n && *s1 && (*s1 == *s2)) { s1++; s2++; n--; }
-    if (n == 0) return 0;
-    return *(unsigned char*)s1 - *(unsigned char*)s2;
+static void sh_strcpy(char* dest, const char* src)
+{
+    while ((*dest++ = *src++));
 }
 
-static void print_str(const char* str) {
-    for (size_t i = 0; str[i] != '\0'; i++) terminal_putchar(str[i]);
+static int sh_strlen(const char* s)
+{
+    int len = 0;
+    while (s[len]) len++;
+    return len;
 }
 
-static void print_dec(uint32_t n) {
+static void print_str(const char* s)
+{
+    for (int i = 0; s[i]; i++) terminal_putchar(s[i]);
+}
+
+static void print_dec(uint32_t n)
+{
     if (n == 0) { terminal_putchar('0'); return; }
-    char buf[32];
-    int i = 0;
+    char buf[16]; int i = 0;
     while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
     for (int j = i - 1; j >= 0; j--) terminal_putchar(buf[j]);
 }
 
-static uint32_t parse_uint(const char* s) {
-    uint32_t v = 0;
-    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
-    return v;
+static void print_hex(uint32_t n)
+{
+    const char* hx = "0123456789ABCDEF";
+    print_str("0x");
+    for (int i = 7; i >= 0; i--)
+        terminal_putchar(hx[(n >> (i * 4)) & 0xF]);
 }
 
 static void print_prompt(void) { print_str("\nRTOS> "); }
 
-static void history_push(const char* cmd) {
-    if (cmd[0] == '\0') return;
-    for (int i = MAX_HISTORY - 1; i > 0; i--) {
-        for (int j = 0; j < MAX_BUFFER; j++) history[i][j] = history[i - 1][j];
-    }
+static int split_args(char* cmd, char args[MAX_ARGS][ARG_LEN], int* argc)
+{
+    *argc = 0;
     int i = 0;
-    while (cmd[i] && i < MAX_BUFFER - 1) { history[0][i] = cmd[i]; i++; }
-    history[0][i] = '\0';
-    if (hist_count < MAX_HISTORY) hist_count++;
+    while (cmd[i] == ' ') i++;
+    while (cmd[i] && *argc < MAX_ARGS) {
+        int j = 0;
+        while (cmd[i] && cmd[i] != ' ' && j < ARG_LEN - 1)
+            args[*argc][j++] = cmd[i++];
+        args[*argc][j] = '\0';
+        (*argc)++;
+        while (cmd[i] == ' ') i++;
+    }
+    return *argc;
 }
 
-static void redraw_line(const char* newcontent) {
-    while (buf_idx > 0) { buf_idx--; terminal_putchar('\b'); }
-    int i = 0;
-    while (newcontent[i] && i < MAX_BUFFER - 1) {
-        buffer[i] = newcontent[i];
-        terminal_putchar(newcontent[i]);
-        i++;
+/* ============================================================================
+   Gestion de l'historique
+   ============================================================================ */
+static void history_add(const char* cmd)
+{
+    if (sh_strlen(cmd) == 0) return;
+    
+    if (history_count > 0 && sh_strcmp(command_history[history_count - 1], cmd) == 0) {
+        return;
     }
-    buf_idx = i;
+    
+    if (history_count < HISTORY_SIZE) {
+        sh_strcpy(command_history[history_count], cmd);
+        history_count++;
+    } else {
+        for (int i = 0; i < HISTORY_SIZE - 1; i++) {
+            sh_strcpy(command_history[i], command_history[i + 1]);
+        }
+        sh_strcpy(command_history[HISTORY_SIZE - 1], cmd);
+    }
 }
 
-static void execute_command(void) {
+static void clear_input_line(void)
+{
+    while (buf_idx > 0) {
+        terminal_putchar('\b');
+        buf_idx--;
+    }
+}
+
+static void display_buffer(void)
+{
+    for (int i = 0; i < buf_idx; i++) {
+        terminal_putchar(buffer[i]);
+    }
+}
+
+void shell_history_up(void)
+{
+    if (history_count == 0) return;
+    
+    if (history_index == -1) {
+        sh_strcpy(saved_buffer, buffer);
+        saved_buf_idx = buf_idx;
+        history_index = history_count - 1;
+    } else if (history_index > 0) {
+        history_index--;
+    } else {
+        return;
+    }
+    
+    clear_input_line();
+    sh_strcpy(buffer, command_history[history_index]);
+    buf_idx = sh_strlen(buffer);
+    display_buffer();
+}
+
+void shell_history_down(void)
+{
+    if (history_index == -1) return;
+    
+    clear_input_line();
+    
+    if (history_index < history_count - 1) {
+        history_index++;
+        sh_strcpy(buffer, command_history[history_index]);
+        buf_idx = sh_strlen(buffer);
+    } else {
+        history_index = -1;
+        sh_strcpy(buffer, saved_buffer);
+        buf_idx = saved_buf_idx;
+    }
+    
+    display_buffer();
+}
+
+/* ============================================================================
+   Commandes
+   ============================================================================ */
+static void cmd_help(void)
+{
+    print_str("\n=== RTOS Shell v2.1 ===\n");
+    print_str("\n  SYSTEME:\n");
+    print_str("   help              - Cette aide\n");
+    print_str("   clear             - Efface l'ecran\n");
+    print_str("   uptime            - Temps depuis le boot\n");
+    print_str("   ticks             - Ticks PIT courants\n");
+    print_str("   reboot            - Redemarrage\n");
+    print_str("\n  NAVIGATION (NOUVEAU v2.1):\n");
+    print_str("   Page Up           - Defiler vers le haut\n");
+    print_str("   Page Down         - Defiler vers le bas\n");
+    print_str("   Ctrl+Home         - Aller au debut\n");
+    print_str("   Ctrl+End          - Aller a la fin\n");
+    print_str("   Fleche Haut       - Commande precedente\n");
+    print_str("   Fleche Bas        - Commande suivante\n");
+    print_str("\n  TACHES & PROCESSUS:\n");
+    print_str("   tasks             - Liste taches (scheduler)\n");
+    print_str("   ps                - Liste processus (PCB)\n");
+    print_str("   spawn <nom>       - Cree un processus\n");
+    print_str("\n  MEMOIRE:\n");
+    print_str("   mem               - Usage du tas\n");
+    print_str("   alloc [octets]    - Alloue de la memoire\n");
+    print_str("   free              - Libere la derniere alloc\n");
+    print_str("   hexdump <addr>    - Dump hex 64 octets\n");
+    print_str("\n  FICHIERS VFS:\n");
+    print_str("   ls                - Liste les fichiers\n");
+    print_str("   cat <fichier>     - Affiche le contenu\n");
+    print_str("   touch <fichier>   - Cree un fichier vide\n");
+    print_str("   write <f> <txt>   - Ecrit dans un fichier\n");
+    print_str("   rm <fichier>      - Supprime un fichier\n");
+    print_str("\n  DIVERS:\n");
+    print_str("   echo <texte>      - Affiche du texte\n");
+    print_str("   calc <n> <op> <m> - Calculatrice (+ - * /)\n");
+    print_str("   sem               - Demo semaphore\n");
+    print_str("   sys               - Test syscalls\n");
+    print_str("   history           - Affiche l'historique\n");
+}
+
+static void cmd_history(void)
+{
+    print_str("\n=== Historique des commandes ===\n");
+    if (history_count == 0) {
+        print_str("  (vide)\n");
+        return;
+    }
+    for (int i = 0; i < history_count; i++) {
+        print_str("  ");
+        print_dec((uint32_t)(i + 1));
+        print_str(": ");
+        print_str(command_history[i]);
+        print_str("\n");
+    }
+}
+
+static void cmd_uptime(void)
+{
+    uint32_t s = get_uptime_sec();
+    uint32_t m = s / 60, h = m / 60;
+    print_str("\nUptime : ");
+    print_dec(h); print_str("h ");
+    print_dec(m % 60); print_str("m ");
+    print_dec(s % 60); print_str("s  (");
+    print_dec(get_ticks()); print_str(" ticks)");
+}
+
+static void cmd_tasks(void)
+{
+    print_str("\n ID   PRI  CPU   STATE\n");
+    print_str(" ---  ---  ---   ---------\n");
+    task_t* start = get_current_task();
+    task_t* cur   = start;
+    do {
+        print_str(" ");
+        print_dec(cur->id);        print_str("    ");
+        print_dec(cur->priority);  print_str("    ");
+        print_dec(cur->cpu_ticks); print_str("   ");
+        switch (cur->state) {
+            case TASK_READY:    print_str("READY\n"); break;
+            case TASK_SLEEPING:
+                print_str("SLEEP(");
+                print_dec(cur->sleep_ticks);
+                print_str(")\n"); break;
+            case TASK_BLOCKED:  print_str("BLOCKED\n"); break;
+            case TASK_ZOMBIE:   print_str("ZOMBIE\n"); break;
+        }
+        cur = cur->next;
+    } while (cur != start);
+}
+
+static void cmd_ps(void)
+{
+    print_str("\n");
+    process_list(print_str);
+}
+
+static void cmd_mem(void)
+{
+    size_t used  = heap_get_used();
+    size_t avail = heap_get_free();
+    size_t total = used + avail;
+    print_str("\nHeap total : ");
+    print_dec((uint32_t)(total / 1024)); print_str(" Ko\n");
+    print_str("  Utilise  : "); print_dec((uint32_t)used);  print_str(" octets\n");
+    print_str("  Libre    : "); print_dec((uint32_t)avail); print_str(" octets\n");
+    uint32_t pct = total ? (uint32_t)(used * 40 / total) : 0;
+    print_str("  [");
+    for (uint32_t i = 0; i < 40; i++)
+        terminal_putchar(i < pct ? '#' : '.');
+    print_str("] ");
+    print_dec(total ? (uint32_t)(used * 100 / total) : 0);
+    print_str("%");
+}
+
+static void cmd_alloc(int argc, char args[MAX_ARGS][ARG_LEN])
+{
+    if (test_alloc_ptr) {
+        print_str("\nDeja alloue ! Faites 'free' d'abord."); return;
+    }
+    uint32_t sz = 1024;
+    if (argc >= 2) {
+        sz = 0;
+        for (int i = 0; args[1][i] >= '0' && args[1][i] <= '9'; i++)
+            sz = sz * 10 + (args[1][i] - '0');
+        if (sz == 0) sz = 1024;
+    }
+    test_alloc_ptr = kmalloc(sz);
+    if (test_alloc_ptr) {
+        print_str("\nAlloue "); print_dec(sz);
+        print_str(" octets @ "); print_hex((uint32_t)test_alloc_ptr);
+    } else {
+        print_str("\nEchec allocation !");
+    }
+}
+
+static void cmd_hexdump(const char* addr_str)
+{
+    uint32_t    addr = 0;
+    const char* p    = addr_str;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    while (*p) {
+        uint8_t nib;
+        if      (*p >= '0' && *p <= '9') nib = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') nib = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') nib = *p - 'A' + 10;
+        else break;
+        addr = (addr << 4) | nib; p++;
+    }
+    print_str("\nHexdump @ "); print_hex(addr); print_str(" :\n");
+    uint8_t* mem = (uint8_t*)addr;
+    for (int row = 0; row < 4; row++) {
+        print_hex(addr + (uint32_t)(row * 16)); print_str("  ");
+        for (int col = 0; col < 16; col++) {
+            uint8_t b = mem[row * 16 + col];
+            const char* h = "0123456789ABCDEF";
+            terminal_putchar(h[b >> 4]);
+            terminal_putchar(h[b & 0xF]);
+            terminal_putchar(' ');
+        }
+        print_str(" |");
+        for (int col = 0; col < 16; col++) {
+            uint8_t b = mem[row * 16 + col];
+            terminal_putchar((b >= 32 && b < 127) ? (char)b : '.');
+        }
+        print_str("|\n");
+    }
+}
+
+static void cmd_calc(int argc, char args[MAX_ARGS][ARG_LEN])
+{
+    if (argc < 4) {
+        print_str("\nUsage: calc <n> <op> <m>"); return;
+    }
+    int32_t a = 0, b = 0; int na = 0, nb = 0;
+    const char* pa = args[1]; if (*pa == '-') { na = 1; pa++; }
+    const char* pb = args[3]; if (*pb == '-') { nb = 1; pb++; }
+    while (*pa >= '0' && *pa <= '9') a = a * 10 + (*pa++ - '0');
+    while (*pb >= '0' && *pb <= '9') b = b * 10 + (*pb++ - '0');
+    if (na) a = -a; if (nb) b = -b;
+    char op = args[2][0]; int32_t res = 0; int ok = 1;
+    switch (op) {
+        case '+': res = a + b; break;
+        case '-': res = a - b; break;
+        case '*': res = a * b; break;
+        case '/':
+            if (b == 0) { print_str("\nDiv/0!"); ok = 0; }
+            else res = a / b; break;
+        default: print_str("\nOp invalide"); ok = 0;
+    }
+    if (ok) {
+        print_str("\nResultat : ");
+        if (res < 0) { terminal_putchar('-'); res = -res; }
+        print_dec((uint32_t)res);
+    }
+}
+
+static void cmd_sem(void)
+{
+    semaphore_t s;
+    sem_init(&s, 3, 3);
+    print_str("\nDemo Semaphore (max=3) :\n");
+    print_str("  Init     : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_wait(&s);
+    print_str("  wait()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_wait(&s);
+    print_str("  wait()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_post(&s);
+    print_str("  post()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    int r = sem_trywait(&s);
+    print_str("  trywait(): "); print_str(r == 0 ? "ok" : "echec");
+    print_str(" -> "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_post(&s); sem_post(&s);
+    print_str("  2xpost() : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+}
+
+static void cmd_sys(void)
+{
+    print_str("\n=== Test Syscalls (int 0x80) ===\n");
+    print_str("[SYS_WRITE  ] ");
+    sys_print("Hello depuis syscall!\n");
+    print_str("[SYS_TICKS  ] ticks = ");
+    print_dec(sys_ticks()); print_str("\n");
+    print_str("[SYS_MALLOC ] 512 octets... ");
+    void* ptr = sys_kmalloc(512);
+    if (ptr) {
+        print_str("ok @ "); print_hex((uint32_t)ptr); print_str("\n");
+        sys_kfree(ptr);
+        print_str("[SYS_FREE   ] libere.\n");
+    } else {
+        print_str("echec!\n");
+    }
+}
+
+static void spawned_task_fn(void)
+{
+    while (1) task_sleep(200);
+}
+
+static void cmd_spawn(int argc, char args[MAX_ARGS][ARG_LEN])
+{
+    const char* name = (argc >= 2) ? args[1] : "proc";
+    int pid = process_create(name, spawned_task_fn, 1, 0);
+    if (pid >= 0) {
+        print_str("\nProcessus '"); print_str(name);
+        print_str("' cree, PID="); print_dec((uint32_t)pid);
+    } else {
+        print_str("\nEchec : pool plein.");
+    }
+}
+
+static void cmd_reboot(void)
+{
+    print_str("\nReboot...");
+    uint32_t zero[2] = {0, 0};
+    __asm__ __volatile__(
+        "cli\n"
+        "lidt (%0)\n"
+        "int $3\n"
+        : : "r"(zero)
+    );
+}
+
+/* ============================================================================
+   Execution des commandes
+   ============================================================================ */
+static void execute_command(void)
+{
     buffer[buf_idx] = '\0';
+    
+    history_index = -1;
+    saved_buf_idx = 0;
+    saved_buffer[0] = '\0';
+    
     if (buf_idx == 0) { print_prompt(); return; }
 
-    history_push(buffer);
-    hist_view = -1;
+    history_add(buffer);
 
-    if (strcmp(buffer, "help") == 0) {
-        print_str("\nAvailable commands:\n");
-        print_str(" help - Show command list\n");
-        print_str(" clear - Clear terminal screen\n");
-        print_str(" ticks - Show current timer ticks\n");
-        print_str(" tasks - Show running tasks and priorities\n");
-        print_str(" spawn - Launch a new demo task (Task C)\n");
-        print_str(" kill <id> - Kill a task by id\n");
-        print_str(" setprio <id> <n> - Change a task's priority\n");
-        print_str(" mem - Show heap memory usage\n");
-        print_str(" alloc - Dynamically allocate 1024 bytes\n");
-        print_str(" free - Free allocated memory\n");
-        print_str(" ls - List RAMDisk files\n");
-        print_str(" cat <file> - Read RAMDisk file\n");
-        print_str(" touch <file> - Create empty file\n");
-        print_str(" write <f> <t> - Write text to file\n");
-        print_str(" rm <file> - Remove file\n");
-        print_str(" sys - Test system calls (int 0x80)\n");
-        print_str(" dmesg - Show kernel log\n");
-        print_str(" echo <text> - Print text to screen");
+    char args[MAX_ARGS][ARG_LEN];
+    int  argc = 0;
+    split_args(buffer, args, &argc);
+    if (argc == 0) { print_prompt(); return; }
 
-    } else if (strcmp(buffer, "clear") == 0) {
+    if      (sh_strcmp(args[0], "help")    == 0) cmd_help();
+    else if (sh_strcmp(args[0], "history") == 0) cmd_history();
+    else if (sh_strcmp(args[0], "clear")   == 0) {
         terminal_clear();
-        terminal_write_at("--- RTOS Preemptive Multitasking + Interactive Shell ---", 0, 0);
+        terminal_write_at("--- RTOS v2.1 | Scrollback + History ---", 0, 0);
         terminal_write_at("Task A (Producer Sent) : ", 2, 0);
         terminal_write_at("Task B (Consumer Recv) : ", 3, 0);
-
-    } else if (strcmp(buffer, "ticks") == 0) {
-        print_str("\nCurrent PIT Ticks: ");
-        print_dec(get_ticks());
-
-    } else if (strcmp(buffer, "tasks") == 0) {
-        print_str("\nTasks Status:\n");
-        task_t* start = get_current_task();
-        task_t* curr = start;
-        do {
-            print_str(" [ID "); print_dec(curr->id);
-            print_str("] Prio: "); print_dec(curr->priority);
-            print_str(" | State: ");
-            if (curr->state == TASK_READY) print_str("READY\n");
-            else if (curr->state == TASK_SLEEPING) {
-                print_str("SLEEPING ("); print_dec(curr->sleep_ticks); print_str(" ticks left)\n");
-            } else if (curr->state == TASK_BLOCKED) print_str("BLOCKED\n");
-            else print_str("?\n");
-            curr = curr->next;
-        } while (curr != start);
-
-    } else if (strcmp(buffer, "spawn") == 0) {
-        int id = create_task(task_c, 2);
-        if (id < 0) print_str("\nFailed: task pool is full.");
-        else { print_str("\nSpawned Task C with id "); print_dec((uint32_t)id); }
-
-    } else if (strncmp(buffer, "kill ", 5) == 0) {
-        uint32_t id = parse_uint(buffer + 5);
-        if (task_kill(id) == 0) { print_str("\nKilled task "); print_dec(id); }
-        else print_str("\nCould not kill that task (not found, idle, or yourself).");
-
-    } else if (strncmp(buffer, "setprio ", 8) == 0) {
-        char* args = buffer + 8;
-        char* space = 0;
-        for (int i = 0; args[i] != '\0'; i++) {
-            if (args[i] == ' ') { space = &args[i]; break; }
+    }
+    else if (sh_strcmp(args[0], "uptime")  == 0) cmd_uptime();
+    else if (sh_strcmp(args[0], "ticks")   == 0) {
+        print_str("\nTicks : "); print_dec(get_ticks());
+    }
+    else if (sh_strcmp(args[0], "tasks")   == 0) cmd_tasks();
+    else if (sh_strcmp(args[0], "ps")      == 0) cmd_ps();
+    else if (sh_strcmp(args[0], "spawn")   == 0) cmd_spawn(argc, args);
+    else if (sh_strcmp(args[0], "mem")     == 0) cmd_mem();
+    else if (sh_strcmp(args[0], "alloc")   == 0) cmd_alloc(argc, args);
+    else if (sh_strcmp(args[0], "free")    == 0) {
+        if (!test_alloc_ptr) { print_str("\nRien a liberer."); }
+        else { kfree(test_alloc_ptr); test_alloc_ptr = 0; print_str("\nLibere."); }
+    }
+    else if (sh_strcmp(args[0], "hexdump") == 0) {
+        if (argc < 2) print_str("\nUsage: hexdump <addr>");
+        else cmd_hexdump(args[1]);
+    }
+    else if (sh_strcmp(args[0], "ls")      == 0) {
+        print_str("\nFichiers VFS:\n"); vfs_list(print_str);
+    }
+    else if (sh_strcmp(args[0], "cat")     == 0) {
+        if (argc < 2) print_str("\nUsage: cat <fichier>");
+        else {
+            vfs_file_t* f = vfs_open(args[1]);
+            if (f) { print_str("\n"); print_str(f->content); }
+            else   { print_str("\nIntrouvable: "); print_str(args[1]); }
         }
-        if (space) {
-            *space = '\0';
-            uint32_t id = parse_uint(args);
-            uint32_t prio = parse_uint(space + 1);
-            if (task_set_priority(id, prio) == 0) print_str("\nPriority updated.");
-            else print_str("\nTask not found.");
-        } else {
-            print_str("\nUsage: setprio <id> <priority>");
+    }
+    else if (sh_strcmp(args[0], "touch")   == 0) {
+        if (argc < 2) print_str("\nUsage: touch <fichier>");
+        else if (vfs_touch(args[1]) == 0) {
+            print_str("\nCree: "); print_str(args[1]);
+        } else print_str("\nEchec.");
+    }
+    else if (sh_strcmp(args[0], "write")   == 0) {
+        if (argc < 3) print_str("\nUsage: write <fichier> <texte>");
+        else {
+            char content[MAX_BUFFER]; int ci = 0;
+            for (int a = 2; a < argc && ci < MAX_BUFFER - 2; a++) {
+                for (int k = 0; args[a][k] && ci < MAX_BUFFER - 2; k++)
+                    content[ci++] = args[a][k];
+                if (a < argc - 1) content[ci++] = ' ';
+            }
+            content[ci] = '\0';
+            if (vfs_write(args[1], content) == 0) {
+                print_str("\nEcrit dans "); print_str(args[1]);
+            } else print_str("\nEchec.");
         }
-
-    } else if (strcmp(buffer, "mem") == 0) {
-        print_str("\nKernel Heap Status:\n");
-        print_str(" Used : "); print_dec(heap_get_used()); print_str(" bytes\n");
-        print_str(" Free : "); print_dec(heap_get_free()); print_str(" bytes");
-
-    } else if (strcmp(buffer, "alloc") == 0) {
-        if (test_alloc_ptr != 0) {
-            print_str("\nMemory already allocated! Use 'free' first.");
-        } else {
-            test_alloc_ptr = kmalloc(1024);
-            print_str(test_alloc_ptr ? "\nAllocated 1024 bytes successfully." : "\nAllocation failed!");
-        }
-
-    } else if (strcmp(buffer, "free") == 0) {
-        if (test_alloc_ptr == 0) {
-            print_str("\nNo memory to free!");
-        } else {
-            kfree(test_alloc_ptr);
-            test_alloc_ptr = 0;
-            print_str("\nMemory freed successfully.");
-        }
-
-    } else if (strcmp(buffer, "ls") == 0) {
-        print_str("\nRAMDisk Files:\n");
-        vfs_list(print_str);
-
-    } else if (strncmp(buffer, "cat ", 4) == 0) {
-        const char* filename = buffer + 4;
-        vfs_file_t* file = vfs_open(filename);
-        if (file) { print_str("\n"); print_str(file->content); }
-        else { print_str("\nFile not found: "); print_str(filename); }
-
-    } else if (strncmp(buffer, "touch ", 6) == 0) {
-        const char* filename = buffer + 6;
-        if (vfs_touch(filename) == 0) { print_str("\nFile created: "); print_str(filename); }
-        else print_str("\nFailed to create file.");
-
-    } else if (strncmp(buffer, "write ", 6) == 0) {
-        char* args = buffer + 6;
-        char* space = 0;
-        for (int i = 0; args[i] != '\0'; i++) {
-            if (args[i] == ' ') { space = &args[i]; break; }
-        }
-        if (space) {
-            *space = '\0';
-            const char* filename = args;
-            const char* content = space + 1;
-            if (vfs_write(filename, content) == 0) { print_str("\nWrote to "); print_str(filename); }
-            else print_str("\nWrite failed (too long for a file, max 255 chars).");
-        } else {
-            print_str("\nUsage: write <file> <text>");
-        }
-
-    } else if (strncmp(buffer, "rm ", 3) == 0) {
-        const char* filename = buffer + 3;
-        if (vfs_remove(filename) == 0) { print_str("\nRemoved: "); print_str(filename); }
-        else print_str("\nFile not found.");
-
-    } else if (strcmp(buffer, "sys") == 0) {
-        print_str("\n=== Testing System Calls (int 0x80) ===");
-        print_str("\n[SYS_WRITE] Message via syscall: ");
-        sys_print("Hello from syscall!");
-        print_str("\n[SYS_GETTICKS] PIT Ticks via syscall: ");
-        print_dec(sys_ticks());
-        print_str("\n[SYS_MALLOC] Allocating 512 bytes via syscall...");
-        void* ptr = sys_kmalloc(512);
-        if (ptr) { print_str("\nAllocation successful!"); sys_kfree(ptr); print_str("\nFreed via syscall."); }
-        else print_str("\nAllocation failed!");
-
-    } else if (strcmp(buffer, "dmesg") == 0) {
+    }
+    else if (sh_strcmp(args[0], "rm")      == 0) {
+        if (argc < 2) print_str("\nUsage: rm <fichier>");
+        else if (vfs_remove(args[1]) == 0) {
+            print_str("\nSupprime: "); print_str(args[1]);
+        } else print_str("\nIntrouvable.");
+    }
+    else if (sh_strcmp(args[0], "echo")    == 0) {
         print_str("\n");
-        klog_dump(print_str);
-
-    } else if (strncmp(buffer, "echo ", 5) == 0) {
-        print_str("\n");
-        print_str(buffer + 5);
-
-    } else {
-        print_str("\nUnknown command. Type 'help' for available commands.");
+        for (int a = 1; a < argc; a++) {
+            print_str(args[a]);
+            if (a < argc - 1) terminal_putchar(' ');
+        }
+    }
+    else if (sh_strcmp(args[0], "calc")    == 0) cmd_calc(argc, args);
+    else if (sh_strcmp(args[0], "sem")     == 0) cmd_sem();
+    else if (sh_strcmp(args[0], "sys")     == 0) cmd_sys();
+    else if (sh_strcmp(args[0], "reboot")  == 0) cmd_reboot();
+    else {
+        print_str("\nInconnu: '"); print_str(args[0]);
+        print_str("'  (tapez 'help')");
     }
 
     buf_idx = 0;
     print_prompt();
 }
 
-void init_shell(void) {
+/* ============================================================================
+   Interface publique
+   ============================================================================ */
+void init_shell(void)
+{
     buf_idx = 0;
-    hist_count = 0;
-    hist_view = -1;
-    print_str("\nType 'help' to get started.");
+    history_count = 0;
+    history_index = -1;
+    saved_buf_idx = 0;
+    saved_buffer[0] = '\0';
+    
+    for (int i = 0; i < HISTORY_SIZE; i++) {
+        command_history[i][0] = '\0';
+    }
+    
+    print_str("\n--- RTOS Shell v2.1 ---");
+    print_str("\nNouveau: PageUp/Down pour defiler, Fleches pour historique");
+    print_str("\nTapez 'help' pour l'aide");
     print_prompt();
 }
 
-void shell_handle_key(char c) {
-    if (c == 0x01) { /* up */
-        if (hist_count > 0 && hist_view < hist_count - 1) {
-            hist_view++;
-            redraw_line(history[hist_view]);
-        }
-        return;
+void shell_handle_key(char c)
+{
+    if (terminal_get_view_offset() != 0) {
+        terminal_scroll_to_bottom();
     }
-    if (c == 0x02) { /* down */
-        if (hist_view > 0) { hist_view--; redraw_line(history[hist_view]); }
-        else if (hist_view == 0) { hist_view = -1; redraw_line(""); }
-        return;
-    }
+    
     if (c == '\n') {
         execute_command();
     } else if (c == '\b') {
-        if (buf_idx > 0) { buf_idx--; terminal_putchar('\b'); }
+        if (buf_idx > 0) { 
+            buf_idx--; 
+            buffer[buf_idx] = '\0';
+            terminal_putchar('\b'); 
+        }
     } else {
-        if (buf_idx < MAX_BUFFER - 1) { buffer[buf_idx++] = c; terminal_putchar(c); }
+        if (buf_idx < MAX_BUFFER - 1) {
+            buffer[buf_idx++] = c;
+            buffer[buf_idx] = '\0';
+            terminal_putchar(c);
+        }
     }
 }

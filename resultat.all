@@ -1,0 +1,3244 @@
+boot.s
+
+; boot.s - En-tête Multiboot + point d'entrée assembleur
+; Compatible GRUB (spec Multiboot 1)
+
+; ==== Constantes Multiboot ====
+MBALIGN     equ  1 << 0              ; aligner les modules chargés sur 4KB
+MEMINFO     equ  1 << 1              ; fournir la mémoire disponible
+MBFLAGS     equ  MBALIGN | MEMINFO   ; combinaison des flags
+MAGIC       equ  0x1BADB002          ; nombre magique pour que GRUB nous détecte
+CHECKSUM    equ -(MAGIC + MBFLAGS)   ; checksum requis par la spec
+
+; ==== En-tête Multiboot (doit être dans les 8 premiers Ko du fichier) ====
+section .multiboot
+align 4
+    dd MAGIC
+    dd MBFLAGS
+    dd CHECKSUM
+
+; ==== Pile du noyau (16 Ko) ====
+section .bss
+align 16
+stack_bottom:
+    resb 16384
+stack_top:
+
+; ==== Point d'entrée ====
+section .text
+global _start
+extern kernel_main
+
+_start:
+    ; Configure la pile (le CPU ne nous en donne pas une au démarrage)
+    mov esp, stack_top
+
+    ; Appelle le noyau C
+    call kernel_main
+
+    ; Si kernel_main retourne jamais (ne devrait pas arriver), boucle infinie
+    cli
+.hang:
+    hlt
+    jmp .hang
+
+----------------------------------------
+
+build-cross-compiler.sh
+
+#!/bin/bash
+set -e
+
+# ==== Configuration ====
+export PREFIX="$HOME/opt/cross"
+export TARGET=i686-elf
+export PATH="$PREFIX/bin:$PATH"
+
+BINUTILS_VERSION=2.42
+GCC_VERSION=13.2.0
+
+mkdir -p "$HOME/src"
+cd "$HOME/src"
+
+# ==== Binutils ====
+if [ ! -f "binutils-${BINUTILS_VERSION}.tar.gz" ]; then
+    wget "https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.gz"
+fi
+tar -xzf "binutils-${BINUTILS_VERSION}.tar.gz"
+
+mkdir -p build-binutils
+cd build-binutils
+../binutils-${BINUTILS_VERSION}/configure \
+    --target=$TARGET \
+    --prefix="$PREFIX" \
+    --with-sysroot \
+    --disable-nls \
+    --disable-werror
+make -j2
+make install
+cd "$HOME/src"
+
+# ==== GCC ====
+if [ ! -f "gcc-${GCC_VERSION}.tar.gz" ]; then
+    wget "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.gz"
+fi
+tar -xzf "gcc-${GCC_VERSION}.tar.gz"
+
+mkdir -p build-gcc
+cd build-gcc
+../gcc-${GCC_VERSION}/configure \
+    --target=$TARGET \
+    --prefix="$PREFIX" \
+    --disable-nls \
+    --enable-languages=c \
+    --without-headers
+make -j2 all-gcc
+make -j2 all-target-libgcc
+make install-gcc
+make install-target-libgcc
+
+echo ""
+echo "=================================================="
+echo "Cross-compilateur installé avec succès !"
+echo "Ajoute cette ligne à ton ~/.bashrc :"
+echo "export PATH=\"\$HOME/opt/cross/bin:\$PATH\""
+echo "=================================================="
+echo ""
+echo "$TARGET-gcc --version" 
+$PREFIX/bin/$TARGET-gcc --version
+
+
+----------------------------------------
+
+gdt.c
+
+#include "gdt.h"
+
+/* Notre table de 3 entrées (Nul, Code, Données) et son pointeur */
+gdt_entry_t gdt_entries[3];
+gdt_ptr_t   gdt_ptr;
+
+/* Fonction assembleur externe pour charger la GDT */
+extern void gdt_flush(uint32_t);
+
+/* Fonction utilitaire pour configurer une entrée */
+static void gdt_set_gate(int32_t num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
+    gdt_entries[num].base_low    = (base & 0xFFFF);
+    gdt_entries[num].base_middle = (base >> 16) & 0xFF;
+    gdt_entries[num].base_high   = (base >> 24) & 0xFF;
+
+    gdt_entries[num].limit_low   = (limit & 0xFFFF);
+    gdt_entries[num].granularity = (limit >> 16) & 0x0F;
+    gdt_entries[num].granularity |= gran & 0xF0;
+    gdt_entries[num].access      = access;
+}
+
+void init_gdt(void) {
+    gdt_ptr.limit = (sizeof(gdt_entry_t) * 3) - 1;
+    gdt_ptr.base  = (uint32_t)&gdt_entries;
+
+    /* Entrée 0 : Segment Nul (obligatoire pour le processeur) */
+    gdt_set_gate(0, 0, 0, 0, 0);                
+    
+    /* Entrée 1 : Segment de Code (Mémoire de 0 à 4Go) */
+    gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF); 
+    
+    /* Entrée 2 : Segment de Données (Mémoire de 0 à 4Go) */
+    gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF); 
+
+    /* On charge la GDT via l'assembleur */
+    gdt_flush((uint32_t)&gdt_ptr);
+}
+
+----------------------------------------
+
+gdt_flush.s
+
+global gdt_flush
+
+section .text
+gdt_flush:
+    mov eax, [esp+4]  ; Récupère le pointeur de la GDT passé en paramètre
+    lgdt [eax]        ; Charge la nouvelle GDT
+
+    ; Met à jour les registres de données avec l'offset 0x10
+    mov ax, 0x10      
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    ; Fait un "far jump" pour mettre à jour le registre de code (CS)
+    jmp 0x08:.flush   
+.flush:
+    ret
+
+----------------------------------------
+
+gdt.h
+
+#ifndef GDT_H
+#define GDT_H
+
+#include <stdint.h>
+
+/* Structure d'une entrée de la GDT (8 octets) */
+struct gdt_entry_struct {
+    uint16_t limit_low;
+    uint16_t base_low;
+    uint8_t  base_middle;
+    uint8_t  access;
+    uint8_t  granularity;
+    uint8_t  base_high;
+} __attribute__((packed));
+typedef struct gdt_entry_struct gdt_entry_t;
+
+/* Pointeur de la GDT (passé à l'instruction assembleur lgdt) */
+struct gdt_ptr_struct {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+typedef struct gdt_ptr_struct gdt_ptr_t;
+
+/* Fonction publique pour initialiser la GDT */
+void init_gdt(void);
+
+#endif
+
+----------------------------------------
+
+heap.c
+
+#include "heap.h"
+#include "mutex.h"
+
+#define HEAP_START  0x01000000
+#define HEAP_SIZE   (1024 * 1024 * 4)   /* 4 Mo */
+
+typedef struct header {
+    size_t          size;
+    int             is_free;
+    struct header*  next;
+} header_t;
+
+static header_t* heap_first = (header_t*)HEAP_START;
+static mutex_t   heap_mutex;
+
+/* ── Initialisation ──────────────────────────────────────────────── */
+void init_heap(void)
+{
+    heap_first->size    = HEAP_SIZE - sizeof(header_t);
+    heap_first->is_free = 1;
+    heap_first->next    = 0;
+    mutex_init(&heap_mutex);
+}
+
+/* ── Allocation ──────────────────────────────────────────────────── */
+void* kmalloc(size_t size)
+{
+    if (size == 0) return 0;
+
+    /* Alignement sur 4 octets */
+    if (size % 4 != 0)
+        size += 4 - (size % 4);
+
+    mutex_lock(&heap_mutex);
+
+    header_t* curr = heap_first;
+    while (curr) {
+        if (curr->is_free && curr->size >= size) {
+            /* Découpage si le bloc est assez grand */
+            if (curr->size >= size + sizeof(header_t) + 16) {
+                header_t* next_block =
+                    (header_t*)((uint8_t*)curr + sizeof(header_t) + size);
+                next_block->size    = curr->size - size - sizeof(header_t);
+                next_block->is_free = 1;
+                next_block->next    = curr->next;
+                curr->size = size;
+                curr->next = next_block;
+            }
+            curr->is_free = 0;
+            mutex_unlock(&heap_mutex);
+            return (void*)((uint8_t*)curr + sizeof(header_t));
+        }
+        curr = curr->next;
+    }
+
+    mutex_unlock(&heap_mutex);
+    return 0;   /* plus de mémoire disponible */
+}
+
+/* ── Libération ──────────────────────────────────────────────────── */
+void kfree(void* ptr)
+{
+    if (!ptr) return;
+
+    mutex_lock(&heap_mutex);
+
+    header_t* header = (header_t*)((uint8_t*)ptr - sizeof(header_t));
+    header->is_free  = 1;
+
+    /* Fusion des blocs libres contigus */
+    header_t* curr = heap_first;
+    while (curr && curr->next) {
+        if (curr->is_free && curr->next->is_free) {
+            curr->size += sizeof(header_t) + curr->next->size;
+            curr->next  = curr->next->next;
+        } else {
+            curr = curr->next;
+        }
+    }
+
+    mutex_unlock(&heap_mutex);
+}
+
+/* ── Statistiques ────────────────────────────────────────────────── */
+size_t heap_get_used(void)
+{
+    mutex_lock(&heap_mutex);
+    size_t used = 0;
+    header_t* curr = heap_first;
+    while (curr) {
+        if (!curr->is_free)
+            used += curr->size + sizeof(header_t);
+        curr = curr->next;
+    }
+    mutex_unlock(&heap_mutex);
+    return used;
+}
+
+size_t heap_get_free(void)
+{
+    return HEAP_SIZE - heap_get_used();
+}
+
+----------------------------------------
+
+heap.h
+
+#ifndef HEAP_H
+#define HEAP_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+void init_heap(void);
+void* kmalloc(size_t size);
+void kfree(void* ptr);
+size_t heap_get_used(void);
+size_t heap_get_free(void);
+
+#endif
+
+----------------------------------------
+
+idt.c
+
+#include "idt.h"
+#include "task.h"
+
+idt_entry_t idt_entries[256];
+idt_ptr_t idt_ptr;
+
+isr_t interrupt_handlers[256];
+
+extern void isr0(void);
+extern void isr1(void);
+extern void isr2(void);
+extern void isr3(void);
+extern void isr4(void);
+extern void isr5(void);
+extern void isr6(void);
+extern void isr7(void);
+extern void isr8(void);
+extern void isr9(void);
+extern void isr10(void);
+extern void isr11(void);
+extern void isr12(void);
+extern void isr13(void);
+extern void isr14(void);
+extern void isr15(void);
+extern void isr16(void);
+extern void isr17(void);
+extern void isr18(void);
+extern void isr19(void);
+extern void isr20(void);
+extern void isr21(void);
+extern void isr22(void);
+extern void isr23(void);
+extern void isr24(void);
+extern void isr25(void);
+extern void isr26(void);
+extern void isr27(void);
+extern void isr28(void);
+extern void isr29(void);
+extern void isr30(void);
+extern void isr31(void);
+
+extern void irq0(void);
+extern void irq1(void);
+extern void isr128(void);
+
+static inline void outb(uint16_t port, uint8_t val) {
+ __asm__ __volatile__ ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint8_t inb(uint16_t port) {
+ uint8_t ret;
+ __asm__ __volatile__ ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+ return ret;
+}
+
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
+ idt_entries[num].base_low = base & 0xFFFF;
+ idt_entries[num].base_high = (base >> 16) & 0xFFFF;
+ idt_entries[num].sel = sel;
+ idt_entries[num].always0 = 0;
+ idt_entries[num].flags = flags;
+}
+
+static void pic_remap(void) {
+ outb(0x20, 0x11);
+ outb(0xA0, 0x11);
+ outb(0x21, 0x20);
+ outb(0xA1, 0x28);
+ outb(0x21, 0x04);
+ outb(0xA1, 0x02);
+ outb(0x21, 0x01);
+ outb(0xA1, 0x01);
+ outb(0x21, 0x00);
+ outb(0xA1, 0x00);
+}
+
+void register_interrupt_handler(uint8_t n, isr_t handler) {
+ interrupt_handlers[n] = handler;
+}
+
+void init_idt(void) {
+ idt_ptr.limit = sizeof(idt_entry_t) * 256 - 1;
+ idt_ptr.base = (uint32_t)&idt_entries;
+ 
+ for (int i = 0; i < 256; i++) {
+ interrupt_handlers[i] = 0;
+ }
+ 
+ pic_remap();
+ 
+ idt_set_gate(0, (uint32_t)isr0, 0x08, 0x8E);
+ idt_set_gate(1, (uint32_t)isr1, 0x08, 0x8E);
+ idt_set_gate(2, (uint32_t)isr2, 0x08, 0x8E);
+ idt_set_gate(3, (uint32_t)isr3, 0x08, 0x8E);
+ idt_set_gate(4, (uint32_t)isr4, 0x08, 0x8E);
+ idt_set_gate(5, (uint32_t)isr5, 0x08, 0x8E);
+ idt_set_gate(6, (uint32_t)isr6, 0x08, 0x8E);
+ idt_set_gate(7, (uint32_t)isr7, 0x08, 0x8E);
+ idt_set_gate(8, (uint32_t)isr8, 0x08, 0x8E);
+ idt_set_gate(9, (uint32_t)isr9, 0x08, 0x8E);
+ idt_set_gate(10, (uint32_t)isr10, 0x08, 0x8E);
+ idt_set_gate(11, (uint32_t)isr11, 0x08, 0x8E);
+ idt_set_gate(12, (uint32_t)isr12, 0x08, 0x8E);
+ idt_set_gate(13, (uint32_t)isr13, 0x08, 0x8E);
+ idt_set_gate(14, (uint32_t)isr14, 0x08, 0x8E);
+ idt_set_gate(15, (uint32_t)isr15, 0x08, 0x8E);
+ idt_set_gate(16, (uint32_t)isr16, 0x08, 0x8E);
+ idt_set_gate(17, (uint32_t)isr17, 0x08, 0x8E);
+ idt_set_gate(18, (uint32_t)isr18, 0x08, 0x8E);
+ idt_set_gate(19, (uint32_t)isr19, 0x08, 0x8E);
+ idt_set_gate(20, (uint32_t)isr20, 0x08, 0x8E);
+ idt_set_gate(21, (uint32_t)isr21, 0x08, 0x8E);
+ idt_set_gate(22, (uint32_t)isr22, 0x08, 0x8E);
+ idt_set_gate(23, (uint32_t)isr23, 0x08, 0x8E);
+ idt_set_gate(24, (uint32_t)isr24, 0x08, 0x8E);
+ idt_set_gate(25, (uint32_t)isr25, 0x08, 0x8E);
+ idt_set_gate(26, (uint32_t)isr26, 0x08, 0x8E);
+ idt_set_gate(27, (uint32_t)isr27, 0x08, 0x8E);
+ idt_set_gate(28, (uint32_t)isr28, 0x08, 0x8E);
+ idt_set_gate(29, (uint32_t)isr29, 0x08, 0x8E);
+ idt_set_gate(30, (uint32_t)isr30, 0x08, 0x8E);
+ idt_set_gate(31, (uint32_t)isr31, 0x08, 0x8E);
+ 
+ idt_set_gate(32, (uint32_t)irq0, 0x08, 0x8E);
+ idt_set_gate(33, (uint32_t)irq1, 0x08, 0x8E);
+ 
+ /* Enregistrement du handler syscall (int 0x80) */
+ /* 0xEE = Accessible en Ring 3 (user mode) */
+ idt_set_gate(0x80, (uint32_t)isr128, 0x08, 0xEE);
+ 
+ __asm__ __volatile__ ("lidt (%0)" : : "r" (&idt_ptr));
+}
+
+void isr_handler(registers_t regs) {
+ if (interrupt_handlers[regs.int_no]) {
+ isr_t handler = interrupt_handlers[regs.int_no];
+ handler(&regs);
+ }
+}
+
+uint32_t irq_handler(registers_t* regs) {
+ if (regs->int_no >= 40) {
+ outb(0xA0, 0x20);
+ }
+ outb(0x20, 0x20);
+ 
+ if (interrupt_handlers[regs->int_no]) {
+ isr_t handler = interrupt_handlers[regs->int_no];
+ handler(regs);
+ }
+ 
+ if (regs->int_no == 32) {
+ return schedule((uint32_t)regs);
+ }
+ 
+ return (uint32_t)regs;
+}
+
+----------------------------------------
+
+idt.h
+
+#ifndef IDT_H
+#define IDT_H
+
+#include <stdint.h>
+
+/* Structure d'une entrée dans la table IDT (8 octets) */
+struct idt_entry_struct {
+ uint16_t base_low;    /* Adresse basse du handler (bits 0-15) */
+ uint16_t sel;         /* Selecteur de segment de code dans la GDT (0x08) */
+ uint8_t always0;      /* Doit toujours être à 0 */
+ uint8_t flags;        /* Drapeaux de présence / privilège (0x8E pour interrupt gate) */
+ uint16_t base_high;   /* Adresse haute du handler (bits 16-31) */
+} __attribute__((packed));
+
+typedef struct idt_entry_struct idt_entry_t;
+
+/* Pointeur IDT (pour l'instruction 'lidt') */
+struct idt_ptr_struct {
+ uint16_t limit;
+ uint32_t base;
+} __attribute__((packed));
+
+typedef struct idt_ptr_struct idt_ptr_t;
+
+/* Structure décrivant l'état des registres au moment d'une interruption */
+typedef struct {
+ uint32_t ds;          /* Segment de données */
+ uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax; /* Registres poussés par pusha */
+ uint32_t int_no, err_code; /* Numéro d'interruption et code d'erreur */
+ uint32_t eip, cs, eflags, useresp, ss; /* Poussés automatiquement par le CPU */
+} registers_t;
+
+/* Prototype pour enregistrer un handler personnalisé */
+typedef void (*isr_t)(registers_t*);
+
+/* Fonctions publiques */
+void register_interrupt_handler(uint8_t n, isr_t handler);
+void init_idt(void);
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags);
+
+#endif
+
+----------------------------------------
+
+interrupts.s
+
+global isr_common_stub
+global irq_common_stub
+global isr128
+
+extern isr_handler
+extern irq_handler
+extern syscall_handler
+
+%macro ISR_NOERRCODE 1
+global isr%1
+isr%1:
+ cli
+ push dword 0
+ push dword %1
+ jmp isr_common_stub
+%endmacro
+
+%macro ISR_ERRCODE 1
+global isr%1
+isr%1:
+ cli
+ push dword %1
+ jmp isr_common_stub
+%endmacro
+
+%macro IRQ 2
+global irq%1
+irq%1:
+ cli
+ push dword 0
+ push dword %2
+ jmp irq_common_stub
+%endmacro
+
+ISR_NOERRCODE 0
+ISR_NOERRCODE 1
+ISR_NOERRCODE 2
+ISR_NOERRCODE 3
+ISR_NOERRCODE 4
+ISR_NOERRCODE 5
+ISR_NOERRCODE 6
+ISR_NOERRCODE 7
+ISR_ERRCODE 8
+ISR_NOERRCODE 9
+ISR_ERRCODE 10
+ISR_ERRCODE 11
+ISR_ERRCODE 12
+ISR_ERRCODE 13
+ISR_ERRCODE 14
+ISR_NOERRCODE 15
+ISR_NOERRCODE 16
+ISR_NOERRCODE 17
+ISR_NOERRCODE 18
+ISR_NOERRCODE 19
+ISR_NOERRCODE 20
+ISR_NOERRCODE 21
+ISR_NOERRCODE 22
+ISR_NOERRCODE 23
+ISR_NOERRCODE 24
+ISR_NOERRCODE 25
+ISR_NOERRCODE 26
+ISR_NOERRCODE 27
+ISR_NOERRCODE 28
+ISR_NOERRCODE 29
+ISR_NOERRCODE 30
+ISR_NOERRCODE 31
+
+IRQ 0, 32
+IRQ 1, 33
+
+section .text
+
+isr_common_stub:
+ pusha
+ mov ax, ds
+ push eax
+ mov ax, 0x10
+ mov ds, ax
+ mov es, ax
+ mov fs, ax
+ mov gs, ax
+ call isr_handler
+ pop eax
+ mov ds, ax
+ mov es, ax
+ mov fs, ax
+ mov gs, ax
+ popa
+ add esp, 8
+ sti
+ iret
+
+irq_common_stub:
+ pusha
+ mov ax, ds
+ push eax
+ mov ax, 0x10
+ mov ds, ax
+ mov es, ax
+ mov fs, ax
+ mov gs, ax
+ push esp
+ call irq_handler
+ mov esp, eax
+ pop eax
+ mov ds, ax
+ mov es, ax
+ mov fs, ax
+ mov gs, ax
+ popa
+ add esp, 8
+ sti
+ iret
+
+isr128:
+ cli
+ push edx ; arg3
+ push ecx ; arg2
+ push ebx ; arg1
+ push eax ; sys_num
+ call syscall_handler
+ add esp, 16
+ sti
+ iret
+
+----------------------------------------
+
+kernel.c
+
+/*
+================================================================================
+FICHIER: kernel.c
+VERSION: 2.1 - Avec support scrollback buffer
+================================================================================
+*/
+
+#include <stdint.h>
+#include <stddef.h>
+#include "gdt.h"
+#include "idt.h"
+#include "timer.h"
+#include "task.h"
+#include "process.h"
+#include "keyboard.h"
+#include "shell.h"
+#include "mutex.h"
+#include "queue.h"
+#include "heap.h"
+#include "vfs.h"
+#include "syscall.h"
+#include "semaphore.h"
+
+static uint16_t* const VGA_BUFFER = (uint16_t*)0xB8000;
+static const int VGA_WIDTH  = 80;
+static const int VGA_HEIGHT = 25;
+
+static const uint8_t VGA_COLOR_DEFAULT = 0x0F;
+static const uint8_t VGA_COLOR_HEADER  = 0x1F;
+static const uint8_t VGA_COLOR_TASKBAR = 0x2F;
+
+/* ============================================================================
+   NOUVEAU: Scrollback Buffer System
+   ============================================================================ */
+#define SCROLLBACK_LINES  200
+#define HEADER_LINES      5
+#define VISIBLE_LINES     (VGA_HEIGHT - HEADER_LINES)
+
+/* Buffer circulaire pour stocker toutes les lignes */
+static char scrollback_buffer[SCROLLBACK_LINES][VGA_WIDTH + 1];
+static uint8_t scrollback_colors[SCROLLBACK_LINES];
+static int scrollback_head = 0;      /* Prochaine ligne a ecrire */
+static int scrollback_count = 0;     /* Nombre total de lignes */
+static int view_offset = 0;          /* Decalage de la vue (0 = bas) */
+
+/* Position curseur dans le buffer courant */
+static int term_col = 0;
+
+static mutex_t vga_mutex;
+static queue_t msg_queue;
+
+/* ============================================================================
+   Fonctions VGA de base
+   ============================================================================ */
+static inline uint16_t vga_entry(char c, uint8_t color)
+{
+    return (uint16_t)c | ((uint16_t)color << 8);
+}
+
+static void vga_put_at(int row, int col, char c, uint8_t color)
+{
+    if (row >= 0 && row < VGA_HEIGHT && col >= 0 && col < VGA_WIDTH) {
+        VGA_BUFFER[row * VGA_WIDTH + col] = vga_entry(c, color);
+    }
+}
+
+static void vga_clear_row(int row, uint8_t color)
+{
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[row * VGA_WIDTH + x] = vga_entry(' ', color);
+    }
+}
+
+/* ============================================================================
+   Scrollback Buffer Management
+   ============================================================================ */
+static void scrollback_init(void)
+{
+    for (int i = 0; i < SCROLLBACK_LINES; i++) {
+        for (int j = 0; j <= VGA_WIDTH; j++) {
+            scrollback_buffer[i][j] = '\0';
+        }
+        scrollback_colors[i] = VGA_COLOR_DEFAULT;
+    }
+    scrollback_head = 0;
+    scrollback_count = 0;
+    view_offset = 0;
+    term_col = 0;
+}
+
+/* Ajoute une nouvelle ligne au buffer */
+static void scrollback_add_line(void)
+{
+    /* Termine la ligne courante */
+    scrollback_buffer[scrollback_head][term_col] = '\0';
+    
+    /* Avance au prochain slot */
+    scrollback_head = (scrollback_head + 1) % SCROLLBACK_LINES;
+    
+    if (scrollback_count < SCROLLBACK_LINES) {
+        scrollback_count++;
+    }
+    
+    /* Clear la nouvelle ligne */
+    for (int i = 0; i <= VGA_WIDTH; i++) {
+        scrollback_buffer[scrollback_head][i] = '\0';
+    }
+    scrollback_colors[scrollback_head] = VGA_COLOR_DEFAULT;
+    
+    term_col = 0;
+    
+    /* Auto-scroll vers le bas */
+    view_offset = 0;
+}
+
+/* Ecrit un caractere dans le buffer courant */
+static void scrollback_putchar(char c, uint8_t color)
+{
+    if (term_col < VGA_WIDTH) {
+        scrollback_buffer[scrollback_head][term_col] = c;
+        scrollback_colors[scrollback_head] = color;
+        term_col++;
+    }
+}
+
+/* Retourne l'index du buffer pour une ligne d'affichage donnee */
+static int scrollback_get_line_index(int display_line)
+{
+    if (scrollback_count == 0) return -1;
+    
+    /* Calcule l'index dans le buffer circulaire */
+    int lines_from_end = (VISIBLE_LINES - 1 - display_line) + view_offset;
+    
+    if (lines_from_end >= scrollback_count) return -1;
+    
+    int idx = scrollback_head - lines_from_end;
+    if (idx < 0) idx += SCROLLBACK_LINES;
+    
+    return idx;
+}
+
+/* ============================================================================
+   Refresh de l'ecran
+   ============================================================================ */
+static void terminal_refresh_view(void)
+{
+    /* Affiche les lignes du scrollback dans la zone visible */
+    for (int row = 0; row < VISIBLE_LINES; row++) {
+        int screen_row = HEADER_LINES + row;
+        int buf_idx = scrollback_get_line_index(row);
+        
+        vga_clear_row(screen_row, VGA_COLOR_DEFAULT);
+        
+        if (buf_idx >= 0) {
+            char* line = scrollback_buffer[buf_idx];
+            uint8_t color = scrollback_colors[buf_idx];
+            
+            for (int col = 0; col < VGA_WIDTH && line[col]; col++) {
+                vga_put_at(screen_row, col, line[col], color);
+            }
+        }
+    }
+    
+    /* Affiche le curseur si on est en bas du scroll */
+    if (view_offset == 0) {
+        int cursor_row = HEADER_LINES + VISIBLE_LINES - 1;
+        vga_put_at(cursor_row, term_col, '_', 0x0F);
+    }
+    
+    /* Indicateur de scroll vers le haut */
+    if (view_offset > 0) {
+        const char* indicator = "^MORE";
+        for (int i = 0; i < 5; i++) {
+            vga_put_at(HEADER_LINES, VGA_WIDTH - 6 + i, indicator[i], 0x0E);
+        }
+    }
+    
+    /* Indicateur de scroll vers le bas */
+    if (scrollback_count > VISIBLE_LINES && view_offset < scrollback_count - VISIBLE_LINES) {
+        const char* indicator = "vMORE";
+        for (int i = 0; i < 5; i++) {
+            vga_put_at(VGA_HEIGHT - 1, VGA_WIDTH - 6 + i, indicator[i], 0x0E);
+        }
+    }
+}
+
+/* ============================================================================
+   Interface publique du terminal
+   ============================================================================ */
+void terminal_clear(void)
+{
+    scrollback_init();
+    
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        vga_clear_row(y, VGA_COLOR_DEFAULT);
+    }
+}
+
+void terminal_putchar(char c)
+{
+    if (c == '\n') {
+        scrollback_add_line();
+        terminal_refresh_view();
+    } else if (c == '\b') {
+        if (term_col > 0) {
+            term_col--;
+            scrollback_buffer[scrollback_head][term_col] = '\0';
+            terminal_refresh_view();
+        }
+    } else {
+        scrollback_putchar(c, VGA_COLOR_DEFAULT);
+        if (term_col >= VGA_WIDTH) {
+            scrollback_add_line();
+        }
+        terminal_refresh_view();
+    }
+}
+
+void terminal_write_at(const char* str, int row, int col)
+{
+    for (size_t i = 0; str[i]; i++) {
+        vga_put_at(row, col + i, str[i], VGA_COLOR_DEFAULT);
+    }
+}
+
+/* ============================================================================
+   NOUVEAU: Fonctions de scroll
+   ============================================================================ */
+void terminal_scroll_up(int lines)
+{
+    int max_offset = scrollback_count - VISIBLE_LINES;
+    if (max_offset < 0) max_offset = 0;
+    
+    view_offset += lines;
+    if (view_offset > max_offset) {
+        view_offset = max_offset;
+    }
+    
+    terminal_refresh_view();
+}
+
+void terminal_scroll_down(int lines)
+{
+    view_offset -= lines;
+    if (view_offset < 0) {
+        view_offset = 0;
+    }
+    
+    terminal_refresh_view();
+}
+
+void terminal_scroll_to_top(void)
+{
+    int max_offset = scrollback_count - VISIBLE_LINES;
+    if (max_offset < 0) max_offset = 0;
+    view_offset = max_offset;
+    terminal_refresh_view();
+}
+
+void terminal_scroll_to_bottom(void)
+{
+    view_offset = 0;
+    terminal_refresh_view();
+}
+
+int terminal_get_view_offset(void)
+{
+    return view_offset;
+}
+
+int terminal_get_total_lines(void)
+{
+    return scrollback_count;
+}
+
+/* ============================================================================
+   Fonctions utilitaires d'affichage
+   ============================================================================ */
+static void terminal_write_at_col(const char* str, int row, int col, uint8_t color)
+{
+    for (size_t i = 0; str[i]; i++) {
+        vga_put_at(row, col + i, str[i], color);
+    }
+}
+
+static void terminal_write_dec(uint32_t n, int row, int col)
+{
+    char buf[12]; int i = 0;
+    if (n == 0) {
+        vga_put_at(row, col, '0', VGA_COLOR_DEFAULT);
+        vga_put_at(row, col + 1, ' ', VGA_COLOR_DEFAULT);
+        return;
+    }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    for (int j = 0; j < i; j++) {
+        vga_put_at(row, col + j, buf[i - 1 - j], VGA_COLOR_DEFAULT);
+    }
+    vga_put_at(row, col + i, ' ', VGA_COLOR_DEFAULT);
+}
+
+static void draw_header(void)
+{
+    const char* title = "  RTOS x86 v2.1 | Scrollback Buffer Support  ";
+    
+    /* Row 0 - Header */
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[x] = vga_entry(' ', VGA_COLOR_HEADER);
+    }
+    terminal_write_at_col(title, 0, 0, VGA_COLOR_HEADER);
+
+    /* Row 1 - Separator */
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[VGA_WIDTH + x] = vga_entry('-', 0x08);
+    }
+
+    /* Row 2-3 - Task info */
+    terminal_write_at_col("Task A (Producer Sent) : ", 2, 0, VGA_COLOR_TASKBAR);
+    terminal_write_at_col("Task B (Consumer Recv) : ", 3, 0, VGA_COLOR_TASKBAR);
+
+    /* Row 4 - Separator */
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[4 * VGA_WIDTH + x] = vga_entry('-', 0x08);
+    }
+}
+
+/* ============================================================================
+   Tasks
+   ============================================================================ */
+static void task_a(void)
+{
+    uint32_t count = 0;
+    while (1) {
+        queue_push(&msg_queue, count);
+        mutex_lock(&vga_mutex);
+        terminal_write_dec(count, 2, 26);
+        mutex_unlock(&vga_mutex);
+        count++;
+        task_sleep(50);
+    }
+}
+
+static void task_b(void)
+{
+    uint32_t val = 0;
+    while (1) {
+        if (queue_pop(&msg_queue, &val)) {
+            mutex_lock(&vga_mutex);
+            terminal_write_dec(val, 3, 26);
+            mutex_unlock(&vga_mutex);
+        }
+        task_sleep(75);
+    }
+}
+
+static void uptime_display_cb(void)
+{
+    static uint32_t last_sec = 0;
+    uint32_t sec = get_uptime_sec();
+    if (sec == last_sec) return;
+    last_sec = sec;
+
+    char buf[16]; int i = 0;
+    uint32_t s = sec, m = s / 60, h = m / 60;
+    if (h > 0) {
+        if (h >= 10) buf[i++] = '0' + h / 10;
+        buf[i++] = '0' + h % 10;
+        buf[i++] = 'h';
+    }
+    if ((m % 60) >= 10) buf[i++] = '0' + (m % 60) / 10;
+    buf[i++] = '0' + (m % 60) % 10;
+    buf[i++] = 'm';
+    if ((s % 60) >= 10) buf[i++] = '0' + (s % 60) / 10;
+    buf[i++] = '0' + (s % 60) % 10;
+    buf[i++] = 's';
+    buf[i] = '\0';
+
+    int col = VGA_WIDTH - i - 1;
+    for (int j = 0; j < i; j++) {
+        VGA_BUFFER[VGA_WIDTH + col + j] = vga_entry(buf[j], 0x0E);
+    }
+}
+
+/* ============================================================================
+   Kernel Main
+   ============================================================================ */
+void kernel_main(void)
+{
+    init_gdt();
+    init_idt();
+    terminal_clear();
+    draw_header();
+    scrollback_init();
+    init_timer(100);
+    timer_register_callback(uptime_display_cb);
+    init_keyboard();
+    init_heap();
+    vfs_init();
+    mutex_init(&vga_mutex);
+    queue_init(&msg_queue);
+    init_tasking();
+    create_task(task_a, 3);
+    create_task(task_b, 2);
+    process_init();
+    init_shell();
+    __asm__ __volatile__("sti");
+    while (1) __asm__ __volatile__("hlt");
+}
+
+----------------------------------------
+
+keyboard.c
+
+/*
+================================================================================
+FICHIER: keyboard.c
+VERSION: 2.1 - Avec support Page Up/Down pour scroll
+================================================================================
+*/
+
+#include "keyboard.h"
+#include "idt.h"
+#include "shell.h"
+
+/* Fonctions externes du terminal */
+extern void terminal_scroll_up(int lines);
+extern void terminal_scroll_down(int lines);
+extern void terminal_scroll_to_top(void);
+extern void terminal_scroll_to_bottom(void);
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ __volatile__("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/* Scancodes speciaux */
+#define SCANCODE_EXTENDED    0xE0
+#define SCANCODE_PAGE_UP     0x49
+#define SCANCODE_PAGE_DOWN   0x51
+#define SCANCODE_HOME        0x47
+#define SCANCODE_END         0x4F
+#define SCANCODE_UP_ARROW    0x48
+#define SCANCODE_DOWN_ARROW  0x50
+#define SCANCODE_LEFT_CTRL   0x1D
+#define SCANCODE_LEFT_CTRL_RELEASE 0x9D
+
+/* Etat des modificateurs */
+static int ctrl_pressed = 0;
+static int extended_mode = 0;
+
+static const char scancode_qwerty[] = {
+    0, 27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
+    '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
+    0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,
+    '\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' '
+};
+
+static void keyboard_callback(registers_t* regs)
+{
+    (void)regs;
+    uint8_t scancode = inb(0x60);
+    
+    /* Detection du prefix extended (E0) */
+    if (scancode == SCANCODE_EXTENDED) {
+        extended_mode = 1;
+        return;
+    }
+    
+    /* Gestion Ctrl press */
+    if (scancode == SCANCODE_LEFT_CTRL) {
+        ctrl_pressed = 1;
+        return;
+    }
+    
+    /* Gestion Ctrl release */
+    if (scancode == SCANCODE_LEFT_CTRL_RELEASE) {
+        ctrl_pressed = 0;
+        return;
+    }
+    
+    /* Touche relachee (bit 7 = 1) ? */
+    if (scancode & 0x80) {
+        extended_mode = 0;
+        return;
+    }
+    
+    /* Traitement des touches extended */
+    if (extended_mode) {
+        extended_mode = 0;
+        
+        switch (scancode) {
+            case SCANCODE_PAGE_UP:
+                /* Page Up - Scroll vers le haut (10 lignes) */
+                terminal_scroll_up(10);
+                return;
+                
+            case SCANCODE_PAGE_DOWN:
+                /* Page Down - Scroll vers le bas (10 lignes) */
+                terminal_scroll_down(10);
+                return;
+                
+            case SCANCODE_HOME:
+                if (ctrl_pressed) {
+                    /* Ctrl+Home - Aller au debut du buffer */
+                    terminal_scroll_to_top();
+                }
+                return;
+                
+            case SCANCODE_END:
+                if (ctrl_pressed) {
+                    /* Ctrl+End - Aller a la fin du buffer */
+                    terminal_scroll_to_bottom();
+                }
+                return;
+                
+            case SCANCODE_UP_ARROW:
+                /* Fleche haut - Historique commande precedente */
+                shell_history_up();
+                return;
+                
+            case SCANCODE_DOWN_ARROW:
+                /* Fleche bas - Historique commande suivante */
+                shell_history_down();
+                return;
+        }
+    }
+    
+    /* Traitement normal des touches */
+    if (scancode < sizeof(scancode_qwerty)) {
+        char c = scancode_qwerty[scancode];
+        if (c != 0) {
+            /* Auto-scroll vers le bas lors de la frappe */
+            terminal_scroll_to_bottom();
+            shell_handle_key(c);
+        }
+    }
+}
+
+void init_keyboard(void)
+{
+    ctrl_pressed = 0;
+    extended_mode = 0;
+    register_interrupt_handler(33, keyboard_callback);
+}
+
+----------------------------------------
+
+keyboard.h
+
+#ifndef KEYBOARD_H
+#define KEYBOARD_H
+
+#include <stdint.h>
+
+void init_keyboard(void);
+
+#endif
+
+----------------------------------------
+
+klog.c
+
+#include "klog.h"
+#include "serial.h"
+#include <stddef.h>
+
+#define KLOG_LINES 16
+#define KLOG_LINE_LEN 64
+
+static char log_buf[KLOG_LINES][KLOG_LINE_LEN];
+static int log_count = 0;
+static int log_head = 0;
+
+static size_t k_strlen(const char* s) { size_t n = 0; while (s[n]) n++; return n; }
+
+void klog_init(void) {
+    log_count = 0;
+    log_head = 0;
+}
+
+void klog(const char* msg) {
+    serial_write(msg);
+    serial_write("\n");
+
+    char* slot = log_buf[log_head];
+    size_t len = k_strlen(msg);
+    if (len >= KLOG_LINE_LEN) len = KLOG_LINE_LEN - 1;
+    for (size_t i = 0; i < len; i++) slot[i] = msg[i];
+    slot[len] = '\0';
+
+    log_head = (log_head + 1) % KLOG_LINES;
+    if (log_count < KLOG_LINES) log_count++;
+}
+
+void klog_dump(void (*print_fn)(const char* str)) {
+    int start = (log_count < KLOG_LINES) ? 0 : log_head;
+    for (int i = 0; i < log_count; i++) {
+        int idx = (start + i) % KLOG_LINES;
+        print_fn(log_buf[idx]);
+        print_fn("\n");
+    }
+}
+
+----------------------------------------
+
+klog.h
+
+#ifndef KLOG_H
+#define KLOG_H
+
+void klog_init(void);
+void klog(const char* msg);
+void klog_dump(void (*print_fn)(const char* str));
+
+#endif
+
+----------------------------------------
+
+linker.ld
+
+/* linker.ld - Définit comment les sections sont placées en mémoire */
+
+ENTRY(_start)
+
+SECTIONS
+{
+    /* Le noyau démarre à 1 Mo, zone standard hors des zones réservées basses */
+    . = 1M;
+
+    .text BLOCK(4K) : ALIGN(4K)
+    {
+        *(.multiboot)
+        *(.text)
+    }
+
+    .rodata BLOCK(4K) : ALIGN(4K)
+    {
+        *(.rodata)
+    }
+
+    .data BLOCK(4K) : ALIGN(4K)
+    {
+        *(.data)
+    }
+
+    .bss BLOCK(4K) : ALIGN(4K)
+    {
+        *(COMMON)
+        *(.bss)
+    }
+}
+
+----------------------------------------
+
+Makefile
+
+# ── Makefile - RTOS x86 v2.0 ─────────────────────────────────────
+CC      = i686-elf-gcc
+AS      = nasm
+LD      = i686-elf-gcc
+
+CFLAGS  = -std=gnu11 -ffreestanding -O2 -Wall -Wextra \
+          -Wno-unused-parameter -fno-stack-protector
+LDFLAGS = -ffreestanding -O2 -nostdlib -lgcc
+
+BUILD   = build
+ISO_DIR = isodir
+KERNEL  = $(BUILD)/kernel.bin
+ISO     = rtos.iso
+
+# ── Objets ────────────────────────────────────────────────────────
+OBJS =  $(BUILD)/boot.o        \
+        $(BUILD)/gdt_flush.o   \
+        $(BUILD)/interrupts.o  \
+        $(BUILD)/gdt.o         \
+        $(BUILD)/idt.o         \
+        $(BUILD)/timer.o       \
+        $(BUILD)/task.o        \
+        $(BUILD)/process.o     \
+        $(BUILD)/keyboard.o    \
+        $(BUILD)/mutex.o       \
+        $(BUILD)/semaphore.o   \
+        $(BUILD)/queue.o       \
+        $(BUILD)/heap.o        \
+        $(BUILD)/vfs.o         \
+        $(BUILD)/syscall.o     \
+        $(BUILD)/shell.o       \
+        $(BUILD)/kernel.o
+
+.PHONY: all clean run iso run-iso
+
+# ── Cibles principales ────────────────────────────────────────────
+all: $(KERNEL)
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+# ── Assembleur ────────────────────────────────────────────────────
+$(BUILD)/boot.o: boot.s | $(BUILD)
+	$(AS) -f elf32 $< -o $@
+
+$(BUILD)/gdt_flush.o: gdt_flush.s | $(BUILD)
+	$(AS) -f elf32 $< -o $@
+
+$(BUILD)/interrupts.o: interrupts.s | $(BUILD)
+	$(AS) -f elf32 $< -o $@
+
+# ── C ─────────────────────────────────────────────────────────────
+$(BUILD)/%.o: %.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# ── Linkage ───────────────────────────────────────────────────────
+$(KERNEL): $(OBJS) linker.ld
+	$(LD) -T linker.ld -o $@ $(LDFLAGS) $(OBJS)
+	@echo ""
+	@echo "  ╔══════════════════════════════════╗"
+	@echo "  ║  RTOS kernel.bin compilé OK !    ║"
+	@echo "  ╚══════════════════════════════════╝"
+	@echo ""
+
+# ── Exécution ─────────────────────────────────────────────────────
+run: $(KERNEL)
+	qemu-system-i386 -kernel $(KERNEL) \
+	    -serial stdio \
+	    -m 32M
+
+# ── ISO GRUB ──────────────────────────────────────────────────────
+iso: $(KERNEL)
+	mkdir -p $(ISO_DIR)/boot/grub
+	cp $(KERNEL) $(ISO_DIR)/boot/kernel.bin
+	printf 'set timeout=0\nset default=0\n\nmenuentry "RTOS v2.0" {\n    multiboot /boot/kernel.bin\n    boot\n}\n' \
+	    > $(ISO_DIR)/boot/grub/grub.cfg
+	grub-mkrescue -o $(ISO) $(ISO_DIR)
+
+run-iso: iso
+	qemu-system-i386 -cdrom $(ISO) -m 32M
+
+# ── Nettoyage ─────────────────────────────────────────────────────
+clean:
+	rm -rf $(BUILD) $(ISO_DIR) $(ISO)
+
+----------------------------------------
+
+mutex.c
+
+#include "mutex.h"
+#include "task.h"
+
+void mutex_init(mutex_t* mutex) {
+    mutex->locked = 0;
+    mutex->owner = 0;
+}
+
+void mutex_lock(mutex_t* mutex) {
+    while (1) {
+        __asm__ __volatile__("cli");
+        if (mutex->locked == 0) {
+            mutex->locked = 1;
+            mutex->owner = get_current_task();
+            __asm__ __volatile__("sti");
+            break;
+        }
+        __asm__ __volatile__("sti");
+        task_sleep(1);
+    }
+}
+
+void mutex_unlock(mutex_t* mutex) {
+    __asm__ __volatile__("cli");
+    if (mutex->locked && mutex->owner == get_current_task()) {
+        mutex->locked = 0;
+        mutex->owner = 0;
+    }
+    __asm__ __volatile__("sti");
+}
+
+----------------------------------------
+
+mutex.h
+
+#ifndef MUTEX_H
+#define MUTEX_H
+
+#include <stdint.h>
+#include "task.h"
+
+typedef struct {
+    volatile uint32_t locked;
+    task_t* owner;
+} mutex_t;
+
+void mutex_init(mutex_t* mutex);
+void mutex_lock(mutex_t* mutex);
+void mutex_unlock(mutex_t* mutex);
+
+#endif
+
+----------------------------------------
+
+panic.c
+
+#include "panic.h"
+#include "serial.h"
+#include <stddef.h>
+
+extern void terminal_putchar(char c);
+
+static const char* exception_names[32] = {
+    "Division By Zero", "Debug", "Non Maskable Interrupt", "Breakpoint",
+    "Overflow", "Out of Bounds", "Invalid Opcode", "No Coprocessor",
+    "Double Fault", "Coprocessor Segment Overrun", "Bad TSS", "Segment Not Present",
+    "Stack Fault", "General Protection Fault", "Page Fault", "Unknown Interrupt",
+    "Coprocessor Fault", "Alignment Check", "Machine Check", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Reserved"
+};
+
+static void print_str(const char* s) {
+    for (size_t i = 0; s[i]; i++) { terminal_putchar(s[i]); serial_putc(s[i]); }
+}
+
+static void print_hex(uint32_t n) {
+    char buf[11] = "0x00000000";
+    for (int i = 9; i >= 2; i--) {
+        uint8_t nibble = n & 0xF;
+        buf[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        n >>= 4;
+    }
+    print_str(buf);
+}
+
+void panic(const char* message, registers_t* regs) {
+    __asm__ __volatile__("cli");
+    print_str("\n\n*** KERNEL PANIC ***\n");
+    print_str(message);
+    if (regs) {
+        print_str("\nEIP: "); print_hex(regs->eip);
+        print_str("  INT: "); print_hex(regs->int_no);
+        print_str("  ERR: "); print_hex(regs->err_code);
+        print_str("\nEAX: "); print_hex(regs->eax);
+        print_str("  EBX: "); print_hex(regs->ebx);
+        print_str("  ECX: "); print_hex(regs->ecx);
+        print_str("  EDX: "); print_hex(regs->edx);
+    }
+    print_str("\nSystem halted.\n");
+    while (1) { __asm__ __volatile__("hlt"); }
+}
+
+void panic_msg(const char* message, uint32_t code) {
+    __asm__ __volatile__("cli");
+    print_str("\n\n*** KERNEL PANIC ***\n");
+    print_str(message);
+    print_str(" (code: ");
+    print_hex(code);
+    print_str(")\nSystem halted.\n");
+    while (1) { __asm__ __volatile__("hlt"); }
+}
+
+static void exception_handler(registers_t* regs) {
+    const char* name = (regs->int_no < 32) ? exception_names[regs->int_no] : "Unknown";
+    panic(name, regs);
+}
+
+void init_panic_handlers(void) {
+    for (uint8_t i = 0; i < 32; i++) {
+        register_interrupt_handler(i, exception_handler);
+    }
+}
+
+----------------------------------------
+
+panic.h
+
+#ifndef PANIC_H
+#define PANIC_H
+
+#include <stdint.h>
+#include "idt.h"
+
+void panic(const char* message, registers_t* regs);
+void panic_msg(const char* message, uint32_t code);
+void init_panic_handlers(void);
+
+#endif
+
+----------------------------------------
+
+process.c
+
+#include "process.h"
+#include "timer.h"
+
+/* ── Pool statique de PCB ─────────────────────────────────────────── */
+static process_t  proc_pool[MAX_PROCESSES];
+static process_t* proc_list_head = 0;
+static process_t* current_proc   = 0;
+static uint32_t   next_pid       = 1;
+
+/* ─── Helpers internes ────────────────────────────────────────────── */
+static const char* state_str(proc_state_t s)
+{
+    switch (s) {
+        case PROC_UNUSED:   return "UNUSED  ";
+        case PROC_READY:    return "READY   ";
+        case PROC_RUNNING:  return "RUNNING ";
+        case PROC_SLEEPING: return "SLEEPING";
+        case PROC_BLOCKED:  return "BLOCKED ";
+        case PROC_ZOMBIE:   return "ZOMBIE  ";
+        default:            return "?       ";
+    }
+}
+
+static void pstrcpy(char* d, const char* s, size_t max)
+{
+    size_t i;
+    for (i = 0; i < max - 1 && s[i]; i++)
+        d[i] = s[i];
+    d[i] = '\0';
+}
+
+static void print_uint(void (*fn)(const char*), uint32_t n)
+{
+    char buf[16];
+    int  i = 0;
+    if (n == 0) { fn("0"); return; }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    char out[16];
+    for (int j = 0; j < i; j++) out[j] = buf[i - 1 - j];
+    out[i] = '\0';
+    fn(out);
+}
+
+/* ─── Initialisation ──────────────────────────────────────────────── */
+void process_init(void)
+{
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        proc_pool[i].state = PROC_UNUSED;
+        proc_pool[i].pid   = 0;
+    }
+
+    /* Processus idle PID 0 */
+    process_t* idle   = &proc_pool[0];
+    idle->pid         = 0;
+    idle->ppid        = 0;
+    idle->priority    = 0;
+    idle->state       = PROC_READY;
+    idle->esp         = 0;
+    idle->sleep_ticks = 0;
+    idle->cpu_time    = 0;
+    idle->wake_tick   = 0;
+    idle->next        = idle;
+    pstrcpy(idle->name, "idle", MAX_PROC_NAME);
+
+    proc_list_head = idle;
+    current_proc   = idle;
+    next_pid       = 1;
+}
+
+/* ─── Création ────────────────────────────────────────────────────── */
+int process_create(const char* name,
+                   void (*entry)(void),
+                   uint32_t priority,
+                   uint32_t ppid)
+{
+    process_t* np = 0;
+    for (int i = 1; i < MAX_PROCESSES; i++) {
+        if (proc_pool[i].state == PROC_UNUSED) {
+            np = &proc_pool[i];
+            break;
+        }
+    }
+    if (!np) return -1;
+
+    np->pid        = next_pid++;
+    np->ppid       = ppid;
+    np->priority   = priority;
+    np->state      = PROC_READY;
+    np->sleep_ticks= 0;
+    np->cpu_time   = 0;
+    np->wake_tick  = 0;
+    pstrcpy(np->name, name, MAX_PROC_NAME);
+
+    /* Construction de la pile initiale */
+    uint32_t* sp = (uint32_t*)(np->stack + PROC_STACK_SIZE);
+
+    *(--sp) = 0x0202;           /* EFLAGS */
+    *(--sp) = 0x08;             /* CS     */
+    *(--sp) = (uint32_t)entry;  /* EIP    */
+    *(--sp) = 0;                /* err_code */
+    *(--sp) = 32;               /* int_no   */
+    for (int i = 0; i < 8; i++) *(--sp) = 0;  /* pusha  */
+    *(--sp) = 0x10;             /* DS     */
+
+    np->esp = (uint32_t)sp;
+
+    /* Insertion en fin de liste circulaire */
+    process_t* t = proc_list_head;
+    while (t->next != proc_list_head) t = t->next;
+    t->next  = np;
+    np->next = proc_list_head;
+
+    return (int)np->pid;
+}
+
+/* ─── Fin de processus ────────────────────────────────────────────── */
+void process_exit(uint32_t pid)
+{
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (proc_pool[i].pid == pid &&
+            proc_pool[i].state != PROC_UNUSED) {
+            proc_pool[i].state = PROC_ZOMBIE;
+            return;
+        }
+    }
+}
+
+/* ─── Accesseurs ──────────────────────────────────────────────────── */
+process_t* process_get(uint32_t pid)
+{
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (proc_pool[i].state != PROC_UNUSED &&
+            proc_pool[i].pid   == pid)
+            return &proc_pool[i];
+    }
+    return 0;
+}
+
+process_t* process_current(void)
+{
+    return current_proc;
+}
+
+uint32_t process_count(void)
+{
+    uint32_t cnt = 0;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (proc_pool[i].state != PROC_UNUSED &&
+            proc_pool[i].state != PROC_ZOMBIE)
+            cnt++;
+    }
+    return cnt;
+}
+
+/* ─── Ordonnanceur ────────────────────────────────────────────────── */
+uint32_t process_schedule(uint32_t current_esp)
+{
+    if (!current_proc) return current_esp;
+
+    current_proc->esp = current_esp;
+    if (current_proc->state == PROC_RUNNING)
+        current_proc->state = PROC_READY;
+
+    uint32_t now = get_ticks();
+    process_t* t = proc_list_head;
+    do {
+        if (t->state == PROC_SLEEPING && now >= t->wake_tick)
+            t->state = PROC_READY;
+        if (t->state == PROC_ZOMBIE)
+            t->state = PROC_UNUSED;
+        t->cpu_time++;
+        t = t->next;
+    } while (t != proc_list_head);
+
+    process_t* best     = 0;
+    uint32_t   best_pri = 0;
+    t = current_proc->next;
+    process_t* stop = t;
+    do {
+        if (t->state == PROC_READY && t->priority >= best_pri) {
+            best_pri = t->priority;
+            best     = t;
+        }
+        t = t->next;
+    } while (t != stop);
+
+    if (!best) best = &proc_pool[0];
+
+    current_proc        = best;
+    current_proc->state = PROC_RUNNING;
+
+    return current_proc->esp;
+}
+
+/* ─── Sleep ───────────────────────────────────────────────────────── */
+void process_sleep(uint32_t ticks)
+{
+    if (ticks == 0) return;
+    current_proc->sleep_ticks = ticks;
+    current_proc->wake_tick   = get_ticks() + ticks;
+    current_proc->state       = PROC_SLEEPING;
+    __asm__ __volatile__ ("int $32");
+}
+
+/* ─── Listage ─────────────────────────────────────────────────────── */
+void process_list(void (*print_fn)(const char*))
+{
+    print_fn(" PID  PPID  PRI  CPU    STATE     NAME\n");
+    print_fn(" ---  ----  ---  -----  --------  --------\n");
+
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        process_t* p = &proc_pool[i];
+        if (p->state == PROC_UNUSED) continue;
+
+        print_fn(" ");
+        print_uint(print_fn, p->pid);   print_fn("     ");
+        print_uint(print_fn, p->ppid);  print_fn("     ");
+        print_uint(print_fn, p->priority); print_fn("    ");
+        print_uint(print_fn, p->cpu_time); print_fn("    ");
+        print_fn(state_str(p->state));  print_fn("  ");
+        print_fn(p->name);
+        print_fn("\n");
+    }
+}
+
+----------------------------------------
+
+process.h
+
+#ifndef PROCESS_H
+#define PROCESS_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#define MAX_PROCESSES     16
+#define MAX_PROC_NAME     32
+#define PROC_STACK_SIZE   8192
+
+/* ── États d'un processus ─────────────────────────────────────────── */
+typedef enum {
+    PROC_UNUSED   = 0,
+    PROC_READY    = 1,
+    PROC_RUNNING  = 2,
+    PROC_SLEEPING = 3,
+    PROC_BLOCKED  = 4,
+    PROC_ZOMBIE   = 5
+} proc_state_t;
+
+/* ── Bloc de contrôle de processus (PCB) ──────────────────────────── */
+typedef struct process {
+    uint32_t     pid;
+    uint32_t     ppid;
+    char         name[MAX_PROC_NAME];
+    proc_state_t state;
+    uint32_t     priority;
+    uint32_t     esp;
+    uint32_t     sleep_ticks;
+    uint32_t     cpu_time;
+    uint32_t     wake_tick;
+    uint8_t      stack[PROC_STACK_SIZE];
+    struct process* next;
+} process_t;
+
+/* ── API publique ─────────────────────────────────────────────────── */
+void      process_init(void);
+int       process_create(const char* name,
+                         void (*entry)(void),
+                         uint32_t priority,
+                         uint32_t ppid);
+void      process_exit(uint32_t pid);
+process_t* process_get(uint32_t pid);
+process_t* process_current(void);
+uint32_t  process_schedule(uint32_t current_esp);
+void      process_sleep(uint32_t ticks);
+void      process_list(void (*print_fn)(const char*));
+uint32_t  process_count(void);
+
+#endif /* PROCESS_H */
+
+----------------------------------------
+
+queue.c
+
+#include "queue.h"
+
+void queue_init(queue_t* q)
+{
+    q->head  = 0;
+    q->tail  = 0;
+    q->count = 0;
+    mutex_init(&q->lock);
+}
+
+bool queue_push(queue_t* q, uint32_t val)
+{
+    mutex_lock(&q->lock);
+    if (q->count >= QUEUE_SIZE) {
+        mutex_unlock(&q->lock);
+        return false;
+    }
+    q->data[q->tail] = val;
+    q->tail          = (q->tail + 1) % QUEUE_SIZE;
+    q->count++;
+    mutex_unlock(&q->lock);
+    return true;
+}
+
+bool queue_pop(queue_t* q, uint32_t* val)
+{
+    mutex_lock(&q->lock);
+    if (q->count == 0) {
+        mutex_unlock(&q->lock);
+        return false;
+    }
+    *val     = q->data[q->head];
+    q->head  = (q->head + 1) % QUEUE_SIZE;
+    q->count--;
+    mutex_unlock(&q->lock);
+    return true;
+}
+
+----------------------------------------
+
+queue.h
+
+#ifndef QUEUE_H
+#define QUEUE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "mutex.h"
+
+#define QUEUE_SIZE 8
+
+typedef struct {
+    uint32_t data[QUEUE_SIZE];
+    int      head;
+    int      tail;
+    int      count;
+    mutex_t  lock;
+} queue_t;
+
+void queue_init(queue_t* q);
+bool queue_push(queue_t* q, uint32_t val);
+bool queue_pop(queue_t* q, uint32_t* val);
+
+#endif /* QUEUE_H */
+
+----------------------------------------
+
+README.md
+
+# rtos-project
+
+----------------------------------------
+
+sema.c
+
+#include "sema.h"
+
+void sema_init(sema_t* s, int32_t initial_count) {
+    s->count = initial_count;
+    s->wait_list = 0;
+}
+
+void sema_wait(sema_t* s) {
+    while (1) {
+        __asm__ __volatile__("cli");
+        if (s->count > 0) {
+            s->count--;
+            __asm__ __volatile__("sti");
+            return;
+        }
+        __asm__ __volatile__("sti");
+        task_block(&s->wait_list);
+    }
+}
+
+void sema_signal(sema_t* s) {
+    __asm__ __volatile__("cli");
+    s->count++;
+    __asm__ __volatile__("sti");
+    task_unblock_all(&s->wait_list);
+}
+
+----------------------------------------
+
+sema.h
+
+#ifndef SEMA_H
+#define SEMA_H
+
+#include <stdint.h>
+#include "task.h"
+
+typedef struct {
+    volatile int32_t count;
+    task_t* wait_list;
+} sema_t;
+
+void sema_init(sema_t* s, int32_t initial_count);
+void sema_wait(sema_t* s);
+void sema_signal(sema_t* s);
+
+#endif
+
+----------------------------------------
+
+semaphore.c
+
+#include "semaphore.h"
+#include "task.h"
+
+void sem_init(semaphore_t* sem, int32_t initial, uint32_t max)
+{
+    sem->count = initial;
+    sem->max   = max;
+}
+
+/* ── P (wait / acquire) ───────────────────────────────────────────── */
+void sem_wait(semaphore_t* sem)
+{
+    while (1) {
+        __asm__ __volatile__ ("cli");
+
+        if (sem->count > 0) {
+            sem->count--;
+            __asm__ __volatile__ ("sti");
+            return;
+        }
+
+        __asm__ __volatile__ ("sti");
+        task_sleep(1);   /* cède le CPU et réessaie après 1 tick */
+    }
+}
+
+/* ── V (post / release) ───────────────────────────────────────────── */
+void sem_post(semaphore_t* sem)
+{
+    __asm__ __volatile__ ("cli");
+
+    if ((uint32_t)sem->count < sem->max)
+        sem->count++;
+
+    __asm__ __volatile__ ("sti");
+}
+
+/* ── Tentative non-bloquante ──────────────────────────────────────── */
+int sem_trywait(semaphore_t* sem)
+{
+    int ret;
+    __asm__ __volatile__ ("cli");
+
+    if (sem->count > 0) {
+        sem->count--;
+        ret = 0;
+    } else {
+        ret = -1;
+    }
+
+    __asm__ __volatile__ ("sti");
+    return ret;
+}
+
+/* ── Lecture de la valeur ─────────────────────────────────────────── */
+int32_t sem_value(semaphore_t* sem)
+{
+    return sem->count;
+}
+
+----------------------------------------
+
+semaphore.h
+
+#ifndef SEMAPHORE_H
+#define SEMAPHORE_H
+
+#include <stdint.h>
+
+/*
+ * Sémaphore compteur.
+ * - sem_wait() : décrémente ; bloque (spin + yield) si valeur <= 0
+ * - sem_post() : incrémente (signal)
+ */
+typedef struct {
+    volatile int32_t count;
+    uint32_t         max;
+} semaphore_t;
+
+void sem_init(semaphore_t* sem, int32_t initial, uint32_t max);
+void sem_wait(semaphore_t* sem);   /* P / acquire */
+void sem_post(semaphore_t* sem);   /* V / release */
+int  sem_trywait(semaphore_t* sem);/* non-bloquant : 0=ok, -1=occupé */
+int32_t sem_value(semaphore_t* sem);
+
+#endif /* SEMAPHORE_H */
+
+----------------------------------------
+
+serial.c
+
+#include "serial.h"
+#include <stddef.h>
+#include <stdint.h>
+
+#define COM1 0x3F8
+
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ __volatile__ ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ __volatile__ ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+void init_serial(void) {
+    outb(COM1 + 1, 0x00);
+    outb(COM1 + 3, 0x80);
+    outb(COM1 + 0, 0x03);
+    outb(COM1 + 1, 0x00);
+    outb(COM1 + 3, 0x03);
+    outb(COM1 + 2, 0xC7);
+    outb(COM1 + 4, 0x0B);
+}
+
+static int is_transmit_empty(void) {
+    return inb(COM1 + 5) & 0x20;
+}
+
+void serial_putc(char c) {
+    while (!is_transmit_empty());
+    outb(COM1, (uint8_t)c);
+}
+
+void serial_write(const char* str) {
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        if (str[i] == '\n') serial_putc('\r');
+        serial_putc(str[i]);
+    }
+}
+
+----------------------------------------
+
+serial.h
+
+#ifndef SERIAL_H
+#define SERIAL_H
+
+void init_serial(void);
+void serial_putc(char c);
+void serial_write(const char* str);
+
+#endif
+
+----------------------------------------
+
+shell.c
+
+/*
+================================================================================
+FICHIER: shell.c
+VERSION: 2.1 - Avec historique commandes et support scroll
+================================================================================
+*/
+
+#include "shell.h"
+#include "timer.h"
+#include "task.h"
+#include "heap.h"
+#include "vfs.h"
+#include "syscall.h"
+#include "semaphore.h"
+#include "process.h"
+#include <stdint.h>
+#include <stddef.h>
+
+extern void terminal_putchar(char c);
+extern void terminal_write_at(const char* str, int row, int col);
+extern void terminal_clear(void);
+extern void terminal_scroll_to_bottom(void);
+extern int  terminal_get_view_offset(void);
+
+#define MAX_BUFFER  128
+#define MAX_ARGS    8
+#define ARG_LEN     32
+
+/* NOUVEAU: Historique des commandes */
+#define HISTORY_SIZE 20
+static char command_history[HISTORY_SIZE][MAX_BUFFER];
+static int  history_count = 0;
+static int  history_index = -1;
+static char saved_buffer[MAX_BUFFER];
+static int  saved_buf_idx = 0;
+
+static char  buffer[MAX_BUFFER];
+static int   buf_idx        = 0;
+static void* test_alloc_ptr = 0;
+
+/* ============================================================================
+   Fonctions utilitaires
+   ============================================================================ */
+static int sh_strcmp(const char* a, const char* b)
+{
+    while (*a && (*a == *b)) { a++; b++; }
+    return *(unsigned char*)a - *(unsigned char*)b;
+}
+
+static void sh_strcpy(char* dest, const char* src)
+{
+    while ((*dest++ = *src++));
+}
+
+static int sh_strlen(const char* s)
+{
+    int len = 0;
+    while (s[len]) len++;
+    return len;
+}
+
+static void print_str(const char* s)
+{
+    for (int i = 0; s[i]; i++) terminal_putchar(s[i]);
+}
+
+static void print_dec(uint32_t n)
+{
+    if (n == 0) { terminal_putchar('0'); return; }
+    char buf[16]; int i = 0;
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    for (int j = i - 1; j >= 0; j--) terminal_putchar(buf[j]);
+}
+
+static void print_hex(uint32_t n)
+{
+    const char* hx = "0123456789ABCDEF";
+    print_str("0x");
+    for (int i = 7; i >= 0; i--)
+        terminal_putchar(hx[(n >> (i * 4)) & 0xF]);
+}
+
+static void print_prompt(void) { print_str("\nRTOS> "); }
+
+static int split_args(char* cmd, char args[MAX_ARGS][ARG_LEN], int* argc)
+{
+    *argc = 0;
+    int i = 0;
+    while (cmd[i] == ' ') i++;
+    while (cmd[i] && *argc < MAX_ARGS) {
+        int j = 0;
+        while (cmd[i] && cmd[i] != ' ' && j < ARG_LEN - 1)
+            args[*argc][j++] = cmd[i++];
+        args[*argc][j] = '\0';
+        (*argc)++;
+        while (cmd[i] == ' ') i++;
+    }
+    return *argc;
+}
+
+/* ============================================================================
+   Gestion de l'historique
+   ============================================================================ */
+static void history_add(const char* cmd)
+{
+    if (sh_strlen(cmd) == 0) return;
+    
+    if (history_count > 0 && sh_strcmp(command_history[history_count - 1], cmd) == 0) {
+        return;
+    }
+    
+    if (history_count < HISTORY_SIZE) {
+        sh_strcpy(command_history[history_count], cmd);
+        history_count++;
+    } else {
+        for (int i = 0; i < HISTORY_SIZE - 1; i++) {
+            sh_strcpy(command_history[i], command_history[i + 1]);
+        }
+        sh_strcpy(command_history[HISTORY_SIZE - 1], cmd);
+    }
+}
+
+static void clear_input_line(void)
+{
+    while (buf_idx > 0) {
+        terminal_putchar('\b');
+        buf_idx--;
+    }
+}
+
+static void display_buffer(void)
+{
+    for (int i = 0; i < buf_idx; i++) {
+        terminal_putchar(buffer[i]);
+    }
+}
+
+void shell_history_up(void)
+{
+    if (history_count == 0) return;
+    
+    if (history_index == -1) {
+        sh_strcpy(saved_buffer, buffer);
+        saved_buf_idx = buf_idx;
+        history_index = history_count - 1;
+    } else if (history_index > 0) {
+        history_index--;
+    } else {
+        return;
+    }
+    
+    clear_input_line();
+    sh_strcpy(buffer, command_history[history_index]);
+    buf_idx = sh_strlen(buffer);
+    display_buffer();
+}
+
+void shell_history_down(void)
+{
+    if (history_index == -1) return;
+    
+    clear_input_line();
+    
+    if (history_index < history_count - 1) {
+        history_index++;
+        sh_strcpy(buffer, command_history[history_index]);
+        buf_idx = sh_strlen(buffer);
+    } else {
+        history_index = -1;
+        sh_strcpy(buffer, saved_buffer);
+        buf_idx = saved_buf_idx;
+    }
+    
+    display_buffer();
+}
+
+/* ============================================================================
+   Commandes
+   ============================================================================ */
+static void cmd_help(void)
+{
+    print_str("\n=== RTOS Shell v2.1 ===\n");
+    print_str("\n  SYSTEME:\n");
+    print_str("   help              - Cette aide\n");
+    print_str("   clear             - Efface l'ecran\n");
+    print_str("   uptime            - Temps depuis le boot\n");
+    print_str("   ticks             - Ticks PIT courants\n");
+    print_str("   reboot            - Redemarrage\n");
+    print_str("\n  NAVIGATION (NOUVEAU v2.1):\n");
+    print_str("   Page Up           - Defiler vers le haut\n");
+    print_str("   Page Down         - Defiler vers le bas\n");
+    print_str("   Ctrl+Home         - Aller au debut\n");
+    print_str("   Ctrl+End          - Aller a la fin\n");
+    print_str("   Fleche Haut       - Commande precedente\n");
+    print_str("   Fleche Bas        - Commande suivante\n");
+    print_str("\n  TACHES & PROCESSUS:\n");
+    print_str("   tasks             - Liste taches (scheduler)\n");
+    print_str("   ps                - Liste processus (PCB)\n");
+    print_str("   spawn <nom>       - Cree un processus\n");
+    print_str("\n  MEMOIRE:\n");
+    print_str("   mem               - Usage du tas\n");
+    print_str("   alloc [octets]    - Alloue de la memoire\n");
+    print_str("   free              - Libere la derniere alloc\n");
+    print_str("   hexdump <addr>    - Dump hex 64 octets\n");
+    print_str("\n  FICHIERS VFS:\n");
+    print_str("   ls                - Liste les fichiers\n");
+    print_str("   cat <fichier>     - Affiche le contenu\n");
+    print_str("   touch <fichier>   - Cree un fichier vide\n");
+    print_str("   write <f> <txt>   - Ecrit dans un fichier\n");
+    print_str("   rm <fichier>      - Supprime un fichier\n");
+    print_str("\n  DIVERS:\n");
+    print_str("   echo <texte>      - Affiche du texte\n");
+    print_str("   calc <n> <op> <m> - Calculatrice (+ - * /)\n");
+    print_str("   sem               - Demo semaphore\n");
+    print_str("   sys               - Test syscalls\n");
+    print_str("   history           - Affiche l'historique\n");
+}
+
+static void cmd_history(void)
+{
+    print_str("\n=== Historique des commandes ===\n");
+    if (history_count == 0) {
+        print_str("  (vide)\n");
+        return;
+    }
+    for (int i = 0; i < history_count; i++) {
+        print_str("  ");
+        print_dec((uint32_t)(i + 1));
+        print_str(": ");
+        print_str(command_history[i]);
+        print_str("\n");
+    }
+}
+
+static void cmd_uptime(void)
+{
+    uint32_t s = get_uptime_sec();
+    uint32_t m = s / 60, h = m / 60;
+    print_str("\nUptime : ");
+    print_dec(h); print_str("h ");
+    print_dec(m % 60); print_str("m ");
+    print_dec(s % 60); print_str("s  (");
+    print_dec(get_ticks()); print_str(" ticks)");
+}
+
+static void cmd_tasks(void)
+{
+    print_str("\n ID   PRI  CPU   STATE\n");
+    print_str(" ---  ---  ---   ---------\n");
+    task_t* start = get_current_task();
+    task_t* cur   = start;
+    do {
+        print_str(" ");
+        print_dec(cur->id);        print_str("    ");
+        print_dec(cur->priority);  print_str("    ");
+        print_dec(cur->cpu_ticks); print_str("   ");
+        switch (cur->state) {
+            case TASK_READY:    print_str("READY\n"); break;
+            case TASK_SLEEPING:
+                print_str("SLEEP(");
+                print_dec(cur->sleep_ticks);
+                print_str(")\n"); break;
+            case TASK_BLOCKED:  print_str("BLOCKED\n"); break;
+            case TASK_ZOMBIE:   print_str("ZOMBIE\n"); break;
+        }
+        cur = cur->next;
+    } while (cur != start);
+}
+
+static void cmd_ps(void)
+{
+    print_str("\n");
+    process_list(print_str);
+}
+
+static void cmd_mem(void)
+{
+    size_t used  = heap_get_used();
+    size_t avail = heap_get_free();
+    size_t total = used + avail;
+    print_str("\nHeap total : ");
+    print_dec((uint32_t)(total / 1024)); print_str(" Ko\n");
+    print_str("  Utilise  : "); print_dec((uint32_t)used);  print_str(" octets\n");
+    print_str("  Libre    : "); print_dec((uint32_t)avail); print_str(" octets\n");
+    uint32_t pct = total ? (uint32_t)(used * 40 / total) : 0;
+    print_str("  [");
+    for (uint32_t i = 0; i < 40; i++)
+        terminal_putchar(i < pct ? '#' : '.');
+    print_str("] ");
+    print_dec(total ? (uint32_t)(used * 100 / total) : 0);
+    print_str("%");
+}
+
+static void cmd_alloc(int argc, char args[MAX_ARGS][ARG_LEN])
+{
+    if (test_alloc_ptr) {
+        print_str("\nDeja alloue ! Faites 'free' d'abord."); return;
+    }
+    uint32_t sz = 1024;
+    if (argc >= 2) {
+        sz = 0;
+        for (int i = 0; args[1][i] >= '0' && args[1][i] <= '9'; i++)
+            sz = sz * 10 + (args[1][i] - '0');
+        if (sz == 0) sz = 1024;
+    }
+    test_alloc_ptr = kmalloc(sz);
+    if (test_alloc_ptr) {
+        print_str("\nAlloue "); print_dec(sz);
+        print_str(" octets @ "); print_hex((uint32_t)test_alloc_ptr);
+    } else {
+        print_str("\nEchec allocation !");
+    }
+}
+
+static void cmd_hexdump(const char* addr_str)
+{
+    uint32_t    addr = 0;
+    const char* p    = addr_str;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    while (*p) {
+        uint8_t nib;
+        if      (*p >= '0' && *p <= '9') nib = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') nib = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') nib = *p - 'A' + 10;
+        else break;
+        addr = (addr << 4) | nib; p++;
+    }
+    print_str("\nHexdump @ "); print_hex(addr); print_str(" :\n");
+    uint8_t* mem = (uint8_t*)addr;
+    for (int row = 0; row < 4; row++) {
+        print_hex(addr + (uint32_t)(row * 16)); print_str("  ");
+        for (int col = 0; col < 16; col++) {
+            uint8_t b = mem[row * 16 + col];
+            const char* h = "0123456789ABCDEF";
+            terminal_putchar(h[b >> 4]);
+            terminal_putchar(h[b & 0xF]);
+            terminal_putchar(' ');
+        }
+        print_str(" |");
+        for (int col = 0; col < 16; col++) {
+            uint8_t b = mem[row * 16 + col];
+            terminal_putchar((b >= 32 && b < 127) ? (char)b : '.');
+        }
+        print_str("|\n");
+    }
+}
+
+static void cmd_calc(int argc, char args[MAX_ARGS][ARG_LEN])
+{
+    if (argc < 4) {
+        print_str("\nUsage: calc <n> <op> <m>"); return;
+    }
+    int32_t a = 0, b = 0; int na = 0, nb = 0;
+    const char* pa = args[1]; if (*pa == '-') { na = 1; pa++; }
+    const char* pb = args[3]; if (*pb == '-') { nb = 1; pb++; }
+    while (*pa >= '0' && *pa <= '9') a = a * 10 + (*pa++ - '0');
+    while (*pb >= '0' && *pb <= '9') b = b * 10 + (*pb++ - '0');
+    if (na) a = -a; if (nb) b = -b;
+    char op = args[2][0]; int32_t res = 0; int ok = 1;
+    switch (op) {
+        case '+': res = a + b; break;
+        case '-': res = a - b; break;
+        case '*': res = a * b; break;
+        case '/':
+            if (b == 0) { print_str("\nDiv/0!"); ok = 0; }
+            else res = a / b; break;
+        default: print_str("\nOp invalide"); ok = 0;
+    }
+    if (ok) {
+        print_str("\nResultat : ");
+        if (res < 0) { terminal_putchar('-'); res = -res; }
+        print_dec((uint32_t)res);
+    }
+}
+
+static void cmd_sem(void)
+{
+    semaphore_t s;
+    sem_init(&s, 3, 3);
+    print_str("\nDemo Semaphore (max=3) :\n");
+    print_str("  Init     : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_wait(&s);
+    print_str("  wait()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_wait(&s);
+    print_str("  wait()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_post(&s);
+    print_str("  post()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    int r = sem_trywait(&s);
+    print_str("  trywait(): "); print_str(r == 0 ? "ok" : "echec");
+    print_str(" -> "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+    sem_post(&s); sem_post(&s);
+    print_str("  2xpost() : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
+}
+
+static void cmd_sys(void)
+{
+    print_str("\n=== Test Syscalls (int 0x80) ===\n");
+    print_str("[SYS_WRITE  ] ");
+    sys_print("Hello depuis syscall!\n");
+    print_str("[SYS_TICKS  ] ticks = ");
+    print_dec(sys_ticks()); print_str("\n");
+    print_str("[SYS_MALLOC ] 512 octets... ");
+    void* ptr = sys_kmalloc(512);
+    if (ptr) {
+        print_str("ok @ "); print_hex((uint32_t)ptr); print_str("\n");
+        sys_kfree(ptr);
+        print_str("[SYS_FREE   ] libere.\n");
+    } else {
+        print_str("echec!\n");
+    }
+}
+
+static void spawned_task_fn(void)
+{
+    while (1) task_sleep(200);
+}
+
+static void cmd_spawn(int argc, char args[MAX_ARGS][ARG_LEN])
+{
+    const char* name = (argc >= 2) ? args[1] : "proc";
+    int pid = process_create(name, spawned_task_fn, 1, 0);
+    if (pid >= 0) {
+        print_str("\nProcessus '"); print_str(name);
+        print_str("' cree, PID="); print_dec((uint32_t)pid);
+    } else {
+        print_str("\nEchec : pool plein.");
+    }
+}
+
+static void cmd_reboot(void)
+{
+    print_str("\nReboot...");
+    uint32_t zero[2] = {0, 0};
+    __asm__ __volatile__(
+        "cli\n"
+        "lidt (%0)\n"
+        "int $3\n"
+        : : "r"(zero)
+    );
+}
+
+/* ============================================================================
+   Execution des commandes
+   ============================================================================ */
+static void execute_command(void)
+{
+    buffer[buf_idx] = '\0';
+    
+    history_index = -1;
+    saved_buf_idx = 0;
+    saved_buffer[0] = '\0';
+    
+    if (buf_idx == 0) { print_prompt(); return; }
+
+    history_add(buffer);
+
+    char args[MAX_ARGS][ARG_LEN];
+    int  argc = 0;
+    split_args(buffer, args, &argc);
+    if (argc == 0) { print_prompt(); return; }
+
+    if      (sh_strcmp(args[0], "help")    == 0) cmd_help();
+    else if (sh_strcmp(args[0], "history") == 0) cmd_history();
+    else if (sh_strcmp(args[0], "clear")   == 0) {
+        terminal_clear();
+        terminal_write_at("--- RTOS v2.1 | Scrollback + History ---", 0, 0);
+        terminal_write_at("Task A (Producer Sent) : ", 2, 0);
+        terminal_write_at("Task B (Consumer Recv) : ", 3, 0);
+    }
+    else if (sh_strcmp(args[0], "uptime")  == 0) cmd_uptime();
+    else if (sh_strcmp(args[0], "ticks")   == 0) {
+        print_str("\nTicks : "); print_dec(get_ticks());
+    }
+    else if (sh_strcmp(args[0], "tasks")   == 0) cmd_tasks();
+    else if (sh_strcmp(args[0], "ps")      == 0) cmd_ps();
+    else if (sh_strcmp(args[0], "spawn")   == 0) cmd_spawn(argc, args);
+    else if (sh_strcmp(args[0], "mem")     == 0) cmd_mem();
+    else if (sh_strcmp(args[0], "alloc")   == 0) cmd_alloc(argc, args);
+    else if (sh_strcmp(args[0], "free")    == 0) {
+        if (!test_alloc_ptr) { print_str("\nRien a liberer."); }
+        else { kfree(test_alloc_ptr); test_alloc_ptr = 0; print_str("\nLibere."); }
+    }
+    else if (sh_strcmp(args[0], "hexdump") == 0) {
+        if (argc < 2) print_str("\nUsage: hexdump <addr>");
+        else cmd_hexdump(args[1]);
+    }
+    else if (sh_strcmp(args[0], "ls")      == 0) {
+        print_str("\nFichiers VFS:\n"); vfs_list(print_str);
+    }
+    else if (sh_strcmp(args[0], "cat")     == 0) {
+        if (argc < 2) print_str("\nUsage: cat <fichier>");
+        else {
+            vfs_file_t* f = vfs_open(args[1]);
+            if (f) { print_str("\n"); print_str(f->content); }
+            else   { print_str("\nIntrouvable: "); print_str(args[1]); }
+        }
+    }
+    else if (sh_strcmp(args[0], "touch")   == 0) {
+        if (argc < 2) print_str("\nUsage: touch <fichier>");
+        else if (vfs_touch(args[1]) == 0) {
+            print_str("\nCree: "); print_str(args[1]);
+        } else print_str("\nEchec.");
+    }
+    else if (sh_strcmp(args[0], "write")   == 0) {
+        if (argc < 3) print_str("\nUsage: write <fichier> <texte>");
+        else {
+            char content[MAX_BUFFER]; int ci = 0;
+            for (int a = 2; a < argc && ci < MAX_BUFFER - 2; a++) {
+                for (int k = 0; args[a][k] && ci < MAX_BUFFER - 2; k++)
+                    content[ci++] = args[a][k];
+                if (a < argc - 1) content[ci++] = ' ';
+            }
+            content[ci] = '\0';
+            if (vfs_write(args[1], content) == 0) {
+                print_str("\nEcrit dans "); print_str(args[1]);
+            } else print_str("\nEchec.");
+        }
+    }
+    else if (sh_strcmp(args[0], "rm")      == 0) {
+        if (argc < 2) print_str("\nUsage: rm <fichier>");
+        else if (vfs_remove(args[1]) == 0) {
+            print_str("\nSupprime: "); print_str(args[1]);
+        } else print_str("\nIntrouvable.");
+    }
+    else if (sh_strcmp(args[0], "echo")    == 0) {
+        print_str("\n");
+        for (int a = 1; a < argc; a++) {
+            print_str(args[a]);
+            if (a < argc - 1) terminal_putchar(' ');
+        }
+    }
+    else if (sh_strcmp(args[0], "calc")    == 0) cmd_calc(argc, args);
+    else if (sh_strcmp(args[0], "sem")     == 0) cmd_sem();
+    else if (sh_strcmp(args[0], "sys")     == 0) cmd_sys();
+    else if (sh_strcmp(args[0], "reboot")  == 0) cmd_reboot();
+    else {
+        print_str("\nInconnu: '"); print_str(args[0]);
+        print_str("'  (tapez 'help')");
+    }
+
+    buf_idx = 0;
+    print_prompt();
+}
+
+/* ============================================================================
+   Interface publique
+   ============================================================================ */
+void init_shell(void)
+{
+    buf_idx = 0;
+    history_count = 0;
+    history_index = -1;
+    saved_buf_idx = 0;
+    saved_buffer[0] = '\0';
+    
+    for (int i = 0; i < HISTORY_SIZE; i++) {
+        command_history[i][0] = '\0';
+    }
+    
+    print_str("\n--- RTOS Shell v2.1 ---");
+    print_str("\nNouveau: PageUp/Down pour defiler, Fleches pour historique");
+    print_str("\nTapez 'help' pour l'aide");
+    print_prompt();
+}
+
+void shell_handle_key(char c)
+{
+    if (terminal_get_view_offset() != 0) {
+        terminal_scroll_to_bottom();
+    }
+    
+    if (c == '\n') {
+        execute_command();
+    } else if (c == '\b') {
+        if (buf_idx > 0) { 
+            buf_idx--; 
+            buffer[buf_idx] = '\0';
+            terminal_putchar('\b'); 
+        }
+    } else {
+        if (buf_idx < MAX_BUFFER - 1) {
+            buffer[buf_idx++] = c;
+            buffer[buf_idx] = '\0';
+            terminal_putchar(c);
+        }
+    }
+}
+
+----------------------------------------
+
+shell.h
+
+/*
+================================================================================
+FICHIER: shell.h
+VERSION: 2.1 - Avec support historique commandes
+================================================================================
+*/
+
+#ifndef SHELL_H
+#define SHELL_H
+
+void init_shell(void);
+void shell_handle_key(char c);
+
+/* NOUVEAU: Navigation dans l'historique des commandes */
+void shell_history_up(void);
+void shell_history_down(void);
+
+#endif
+
+----------------------------------------
+
+syscall.c
+
+#include "syscall.h"
+#include "timer.h"
+#include "heap.h"
+#include <stdint.h>
+
+extern void terminal_putchar(char c);
+
+static void print_str(const char* str) {
+ for (size_t i = 0; str[i] != '\0'; i++) {
+ terminal_putchar(str[i]);
+ }
+}
+
+uint32_t syscall_handler(uint32_t sys_num, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+ (void)arg2;
+ (void)arg3;
+ 
+ switch (sys_num) {
+ case SYS_WRITE:
+ print_str((const char*)arg1);
+ return 0;
+ 
+ case SYS_GETTICKS:
+ return get_ticks();
+ 
+ case SYS_MALLOC:
+ return (uint32_t)kmalloc((size_t)arg1);
+ 
+ case SYS_FREE:
+ kfree((void*)arg1);
+ return 0;
+ 
+ default:
+ return (uint32_t)-1;
+ }
+}
+
+void sys_print(const char* str) {
+ __asm__ __volatile__ (
+ "int $0x80"
+ :
+ : "a"(SYS_WRITE), "b"((uint32_t)str)
+ );
+}
+
+uint32_t sys_ticks(void) {
+ uint32_t ret;
+ __asm__ __volatile__ (
+ "int $0x80"
+ : "=a"(ret)
+ : "a"(SYS_GETTICKS)
+ );
+ return ret;
+}
+
+void* sys_kmalloc(size_t size) {
+ uint32_t ret;
+ __asm__ __volatile__ (
+ "int $0x80"
+ : "=a"(ret)
+ : "a"(SYS_MALLOC), "b"((uint32_t)size)
+ );
+ return (void*)ret;
+}
+
+void sys_kfree(void* ptr) {
+ __asm__ __volatile__ (
+ "int $0x80"
+ :
+ : "a"(SYS_FREE), "b"((uint32_t)ptr)
+ );
+}
+
+----------------------------------------
+
+syscall.h
+
+#ifndef SYSCALL_H
+#define SYSCALL_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#define SYS_WRITE 1
+#define SYS_GETTICKS 2
+#define SYS_MALLOC 3
+#define SYS_FREE 4
+
+void sys_print(const char* str);
+uint32_t sys_ticks(void);
+void* sys_kmalloc(size_t size);
+void sys_kfree(void* ptr);
+
+#endif
+
+----------------------------------------
+
+task.c
+
+#include "task.h"
+
+/* ── Données privées ─────────────────────────────────────────────── */
+static task_t  main_task;
+static task_t* current_task = &main_task;
+static uint32_t next_pid    = 1;
+static uint32_t total_tasks = 1;
+
+#define TASK_POOL_SIZE 8
+static task_t task_pool[TASK_POOL_SIZE];
+static int    pool_index = 0;
+
+/* ── Initialisation ──────────────────────────────────────────────── */
+void init_tasking(void)
+{
+    main_task.id          = 0;
+    main_task.priority    = 1;
+    main_task.esp         = 0;
+    main_task.state       = TASK_READY;
+    main_task.sleep_ticks = 0;
+    main_task.cpu_ticks   = 0;
+    main_task.next        = &main_task;
+    current_task          = &main_task;
+    total_tasks           = 1;
+    pool_index            = 0;
+}
+
+/* ── Création d'une tâche ────────────────────────────────────────── */
+void create_task(void (*entry)(void), uint32_t priority)
+{
+    if (pool_index >= TASK_POOL_SIZE) return;
+
+    task_t* nt = &task_pool[pool_index++];
+    nt->id          = next_pid++;
+    nt->priority    = priority;
+    nt->state       = TASK_READY;
+    nt->sleep_ticks = 0;
+    nt->cpu_ticks   = 0;
+
+    /* Construction de la pile initiale */
+    uint32_t* sp = (uint32_t*)(nt->stack + 4096);
+
+    /* iret frame */
+    *(--sp) = 0x0202;           /* EFLAGS */
+    *(--sp) = 0x08;             /* CS     */
+    *(--sp) = (uint32_t)entry;  /* EIP    */
+
+    /* err_code + int_no (consommés par add esp,8) */
+    *(--sp) = 0;
+    *(--sp) = 32;
+
+    /* pusha : 8 registres */
+    for (int i = 0; i < 8; i++) *(--sp) = 0;
+
+    /* DS */
+    *(--sp) = 0x10;
+
+    nt->esp = (uint32_t)sp;
+
+    /* Insertion dans la liste circulaire */
+    nt->next = current_task->next;
+    current_task->next = nt;
+
+    total_tasks++;
+}
+
+/* ── Ordonnanceur préemptif ──────────────────────────────────────── */
+uint32_t schedule(uint32_t current_esp)
+{
+    if (!current_task) return current_esp;
+
+    current_task->esp = current_esp;
+
+    /* Décrémente les compteurs de sommeil */
+    task_t* t = current_task;
+    do {
+        if (t->state == TASK_SLEEPING) {
+            if (t->sleep_ticks > 0) t->sleep_ticks--;
+            if (t->sleep_ticks == 0) t->state = TASK_READY;
+        }
+        t = t->next;
+    } while (t != current_task);
+
+    /* Sélection par priorité la plus haute */
+    task_t*  best      = 0;
+    uint32_t best_prio = 0;
+
+    t = current_task->next;
+    do {
+        if (t->state == TASK_READY && t->priority > best_prio) {
+            best_prio = t->priority;
+            best      = t;
+        }
+        t = t->next;
+    } while (t != current_task->next);
+
+    if (best) {
+        current_task = best;
+    }
+
+    current_task->cpu_ticks++;
+    return current_task->esp;
+}
+
+/* ── Sleep ───────────────────────────────────────────────────────── */
+void task_sleep(uint32_t ticks)
+{
+    if (ticks == 0) return;
+    current_task->sleep_ticks = ticks;
+    current_task->state       = TASK_SLEEPING;
+    __asm__ __volatile__ ("int $32");
+}
+
+/* ── Yield volontaire ────────────────────────────────────────────── */
+void task_yield(void)
+{
+    __asm__ __volatile__ ("int $32");
+}
+
+/* ── Accesseurs ──────────────────────────────────────────────────── */
+task_t* get_current_task(void)
+{
+    return current_task;
+}
+
+uint32_t task_count(void)
+{
+    return total_tasks;
+}
+
+----------------------------------------
+
+task.h
+
+#ifndef TASK_H
+#define TASK_H
+
+#include <stdint.h>
+
+/* États étendus */
+typedef enum {
+    TASK_READY    = 0,
+    TASK_SLEEPING = 1,
+    TASK_BLOCKED  = 2,
+    TASK_ZOMBIE   = 3
+} task_state_t;
+
+typedef struct task {
+    uint32_t     esp;
+    uint32_t     id;
+    uint32_t     priority;
+    task_state_t state;
+    uint32_t     sleep_ticks;
+    uint32_t     cpu_ticks;     /* temps CPU cumulé (ticks) */
+    uint8_t      stack[4096];
+    struct task* next;
+} task_t;
+
+void    init_tasking(void);
+void    create_task(void (*entry)(void), uint32_t priority);
+uint32_t schedule(uint32_t current_esp);
+void    task_sleep(uint32_t ticks);
+void    task_yield(void);
+task_t* get_current_task(void);
+uint32_t task_count(void);
+
+#endif /* TASK_H */
+
+----------------------------------------
+
+timer.c
+
+#include "timer.h"
+#include "idt.h"
+
+static volatile uint32_t timer_ticks    = 0;
+static volatile uint32_t timer_freq_hz  = 100;
+
+static timer_callback_t callbacks[TIMER_MAX_CALLBACKS];
+static int              cb_count = 0;
+
+/* ── Callback principal IRQ0 ─────────────────────────────────────── */
+static void timer_irq_callback(registers_t* regs)
+{
+    (void)regs;
+    timer_ticks++;
+
+    /* Appel de tous les callbacks enregistrés */
+    for (int i = 0; i < cb_count; i++) {
+        if (callbacks[i])
+            callbacks[i]();
+    }
+}
+
+/* ── Initialisation ──────────────────────────────────────────────── */
+void init_timer(uint32_t frequency)
+{
+    timer_freq_hz = frequency;
+    cb_count      = 0;
+
+    for (int i = 0; i < TIMER_MAX_CALLBACKS; i++)
+        callbacks[i] = 0;
+
+    register_interrupt_handler(32, timer_irq_callback);
+
+    uint32_t divisor = 1193180 / frequency;
+
+    /* Programmation du PIT canal 0, mode 3 (carré) */
+    __asm__ __volatile__ (
+        "outb %0, %1" : : "a"((uint8_t)0x36), "Nd"((uint16_t)0x43));
+    __asm__ __volatile__ (
+        "outb %0, %1" : : "a"((uint8_t)(divisor & 0xFF)), "Nd"((uint16_t)0x40));
+    __asm__ __volatile__ (
+        "outb %0, %1" : : "a"((uint8_t)((divisor >> 8) & 0xFF)), "Nd"((uint16_t)0x40));
+}
+
+/* ── Getters ─────────────────────────────────────────────────────── */
+uint32_t get_ticks(void)
+{
+    return timer_ticks;
+}
+
+uint32_t get_uptime_sec(void)
+{
+    return timer_ticks / timer_freq_hz;
+}
+
+/* ── Enregistrement de callbacks ─────────────────────────────────── */
+int timer_register_callback(timer_callback_t cb)
+{
+    if (cb_count >= TIMER_MAX_CALLBACKS) return -1;
+    callbacks[cb_count++] = cb;
+    return 0;
+}
+
+void timer_unregister_callback(timer_callback_t cb)
+{
+    for (int i = 0; i < cb_count; i++) {
+        if (callbacks[i] == cb) {
+            /* Décale */
+            for (int j = i; j < cb_count - 1; j++)
+                callbacks[j] = callbacks[j + 1];
+            callbacks[--cb_count] = 0;
+            return;
+        }
+    }
+}
+
+/* ── Attente active ──────────────────────────────────────────────── */
+void timer_wait_ms(uint32_t ms)
+{
+    uint32_t ticks_needed = (ms * timer_freq_hz) / 1000;
+    if (ticks_needed == 0) ticks_needed = 1;
+    uint32_t start = timer_ticks;
+    while ((timer_ticks - start) < ticks_needed)
+        __asm__ __volatile__ ("hlt");
+}
+
+----------------------------------------
+
+timer.h
+
+#ifndef TIMER_H
+#define TIMER_H
+
+#include <stdint.h>
+
+#define TIMER_MAX_CALLBACKS 8
+
+/* Callback périodique : appelé à chaque tick */
+typedef void (*timer_callback_t)(void);
+
+void     init_timer(uint32_t frequency);
+uint32_t get_ticks(void);
+uint32_t get_uptime_sec(void);
+
+/* Enregistrement de callbacks supplémentaires */
+int  timer_register_callback(timer_callback_t cb);
+void timer_unregister_callback(timer_callback_t cb);
+
+/* Utilitaire : attente active (spin) en millisecondes */
+void timer_wait_ms(uint32_t ms);
+
+#endif /* TIMER_H */
+
+----------------------------------------
+
+vfs.c
+
+#include "vfs.h"
+
+static vfs_file_t files[MAX_FILES];
+
+static size_t strlen(const char* str) {
+    size_t len = 0;
+    while (str[len]) len++;
+    return len;
+}
+
+static int strcmp(const char* s1, const char* s2) {
+    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
+    return *(unsigned char*)s1 - *(unsigned char*)s2;
+}
+
+/* copie bornée : refuse (retourne -1) si src ne tient pas dans max_len-1 chars,
+   au lieu de déborder comme le faisait l'ancien strcpy() */
+static int safe_copy(char* dest, const char* src, size_t max_len) {
+    size_t len = strlen(src);
+    if (len >= max_len) return -1;
+    for (size_t i = 0; i < len; i++) dest[i] = src[i];
+    dest[len] = '\0';
+    return 0;
+}
+
+void vfs_init(void) {
+    for (int i = 0; i < MAX_FILES; i++) files[i].used = 0;
+    vfs_create("readme.txt", "Bienvenue sur le RTOS x86 (v1.0) !");
+    vfs_create("kernel.info", "Architecture : i686 (x86 32-bit)\nMultitasking : Preemptif + Priorite");
+    vfs_create("author.txt", "Concu par un Developpeur OS passionne.");
+}
+
+int vfs_create(const char* name, const char* content) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!files[i].used) {
+            if (safe_copy(files[i].name, name, MAX_FILENAME) < 0) return -1;
+            if (safe_copy(files[i].content, content, MAX_FILE_SIZE) < 0) return -1;
+            files[i].size = strlen(content);
+            files[i].used = 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+vfs_file_t* vfs_open(const char* name) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (files[i].used && strcmp(files[i].name, name) == 0) return &files[i];
+    }
+    return 0;
+}
+
+void vfs_list(void (*print_fn)(const char* str)) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (files[i].used) {
+            print_fn(" - ");
+            print_fn(files[i].name);
+            print_fn("\n");
+        }
+    }
+}
+
+int vfs_touch(const char* name) {
+    if (vfs_open(name) != 0) return 0;
+    return vfs_create(name, "");
+}
+
+int vfs_write(const char* name, const char* content) {
+    vfs_file_t* file = vfs_open(name);
+    if (!file) return vfs_create(name, content);
+    if (safe_copy(file->content, content, MAX_FILE_SIZE) < 0) return -1;
+    file->size = strlen(content);
+    return 0;
+}
+
+int vfs_remove(const char* name) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (files[i].used && strcmp(files[i].name, name) == 0) {
+            files[i].used = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+----------------------------------------
+
+vfs.h
+
+#ifndef VFS_H
+#define VFS_H
+
+#include <stddef.h>
+
+#define MAX_FILES 10
+#define MAX_FILENAME 32
+#define MAX_FILE_SIZE 256
+
+typedef struct {
+    char name[MAX_FILENAME];
+    char content[MAX_FILE_SIZE];
+    size_t size;
+    int used;
+} vfs_file_t;
+
+void vfs_init(void);
+int vfs_create(const char* name, const char* content);
+vfs_file_t* vfs_open(const char* name);
+void vfs_list(void (*print_fn)(const char* str));
+int vfs_touch(const char* name);
+int vfs_write(const char* name, const char* content);
+int vfs_remove(const char* name);
+
+#endif
+
+----------------------------------------
+

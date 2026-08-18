@@ -1,9 +1,17 @@
+/*
+================================================================================
+FICHIER: kernel.c
+VERSION: 2.1 - Avec support scrollback buffer
+================================================================================
+*/
+
 #include <stdint.h>
 #include <stddef.h>
 #include "gdt.h"
 #include "idt.h"
 #include "timer.h"
 #include "task.h"
+#include "process.h"
 #include "keyboard.h"
 #include "shell.h"
 #include "mutex.h"
@@ -11,129 +19,389 @@
 #include "heap.h"
 #include "vfs.h"
 #include "syscall.h"
-#include "serial.h"
-#include "panic.h"
-#include "klog.h"
+#include "semaphore.h"
 
-static uint16_t* const VGA_BUFFER = (uint16_t*) 0xB8000;
-static const int VGA_WIDTH = 80;
+static uint16_t* const VGA_BUFFER = (uint16_t*)0xB8000;
+static const int VGA_WIDTH  = 80;
 static const int VGA_HEIGHT = 25;
-static const uint8_t VGA_COLOR = 0x0F;
+
+static const uint8_t VGA_COLOR_DEFAULT = 0x0F;
+static const uint8_t VGA_COLOR_HEADER  = 0x1F;
+static const uint8_t VGA_COLOR_TASKBAR = 0x2F;
+
+/* ============================================================================
+   NOUVEAU: Scrollback Buffer System
+   ============================================================================ */
+#define SCROLLBACK_LINES  200
+#define HEADER_LINES      5
+#define VISIBLE_LINES     (VGA_HEIGHT - HEADER_LINES)
+
+/* Buffer circulaire pour stocker toutes les lignes */
+static char scrollback_buffer[SCROLLBACK_LINES][VGA_WIDTH + 1];
+static uint8_t scrollback_colors[SCROLLBACK_LINES];
+static int scrollback_head = 0;      /* Prochaine ligne a ecrire */
+static int scrollback_count = 0;     /* Nombre total de lignes */
+static int view_offset = 0;          /* Decalage de la vue (0 = bas) */
+
+/* Position curseur dans le buffer courant */
 static int term_col = 0;
-static int term_row = 5;
+
 static mutex_t vga_mutex;
 static queue_t msg_queue;
 
-static inline uint16_t vga_entry(char c, uint8_t color) {
-    return (uint16_t) c | (uint16_t) color << 8;
+/* ============================================================================
+   Fonctions VGA de base
+   ============================================================================ */
+static inline uint16_t vga_entry(char c, uint8_t color)
+{
+    return (uint16_t)c | ((uint16_t)color << 8);
 }
 
-void terminal_clear(void) {
-    for (int y = 0; y < VGA_HEIGHT; y++)
-        for (int x = 0; x < VGA_WIDTH; x++)
-            VGA_BUFFER[y * VGA_WIDTH + x] = vga_entry(' ', VGA_COLOR);
+static void vga_put_at(int row, int col, char c, uint8_t color)
+{
+    if (row >= 0 && row < VGA_HEIGHT && col >= 0 && col < VGA_WIDTH) {
+        VGA_BUFFER[row * VGA_WIDTH + col] = vga_entry(c, color);
+    }
+}
+
+static void vga_clear_row(int row, uint8_t color)
+{
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[row * VGA_WIDTH + x] = vga_entry(' ', color);
+    }
+}
+
+/* ============================================================================
+   Scrollback Buffer Management
+   ============================================================================ */
+static void scrollback_init(void)
+{
+    for (int i = 0; i < SCROLLBACK_LINES; i++) {
+        for (int j = 0; j <= VGA_WIDTH; j++) {
+            scrollback_buffer[i][j] = '\0';
+        }
+        scrollback_colors[i] = VGA_COLOR_DEFAULT;
+    }
+    scrollback_head = 0;
+    scrollback_count = 0;
+    view_offset = 0;
     term_col = 0;
-    term_row = 5;
 }
 
-void terminal_write_at(const char* str, int row, int col) {
-    for (size_t i = 0; str[i] != '\0'; i++)
-        VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(str[i], VGA_COLOR);
-}
-
-static void scroll(void) {
-    if (term_row >= VGA_HEIGHT) {
-        for (int y = 5; y < VGA_HEIGHT - 1; y++)
-            for (int x = 0; x < VGA_WIDTH; x++)
-                VGA_BUFFER[y * VGA_WIDTH + x] = VGA_BUFFER[(y + 1) * VGA_WIDTH + x];
-        for (int x = 0; x < VGA_WIDTH; x++)
-            VGA_BUFFER[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = vga_entry(' ', VGA_COLOR);
-        term_row = VGA_HEIGHT - 1;
+/* Ajoute une nouvelle ligne au buffer */
+static void scrollback_add_line(void)
+{
+    /* Termine la ligne courante */
+    scrollback_buffer[scrollback_head][term_col] = '\0';
+    
+    /* Avance au prochain slot */
+    scrollback_head = (scrollback_head + 1) % SCROLLBACK_LINES;
+    
+    if (scrollback_count < SCROLLBACK_LINES) {
+        scrollback_count++;
     }
+    
+    /* Clear la nouvelle ligne */
+    for (int i = 0; i <= VGA_WIDTH; i++) {
+        scrollback_buffer[scrollback_head][i] = '\0';
+    }
+    scrollback_colors[scrollback_head] = VGA_COLOR_DEFAULT;
+    
+    term_col = 0;
+    
+    /* Auto-scroll vers le bas */
+    view_offset = 0;
 }
 
-void terminal_putchar(char c) {
-    if (c == '\n') { term_col = 0; term_row++; scroll(); }
-    else if (c == '\b') {
-        if (term_col > 0) { term_col--; VGA_BUFFER[term_row * VGA_WIDTH + term_col] = vga_entry(' ', VGA_COLOR); }
-    } else {
-        VGA_BUFFER[term_row * VGA_WIDTH + term_col] = vga_entry(c, VGA_COLOR);
+/* Ecrit un caractere dans le buffer courant */
+static void scrollback_putchar(char c, uint8_t color)
+{
+    if (term_col < VGA_WIDTH) {
+        scrollback_buffer[scrollback_head][term_col] = c;
+        scrollback_colors[scrollback_head] = color;
         term_col++;
-        if (term_col >= VGA_WIDTH) { term_col = 0; term_row++; scroll(); }
     }
 }
 
-void terminal_write_dec(uint32_t n, int row, int col) {
+/* Retourne l'index du buffer pour une ligne d'affichage donnee */
+static int scrollback_get_line_index(int display_line)
+{
+    if (scrollback_count == 0) return -1;
+    
+    /* Calcule l'index dans le buffer circulaire */
+    int lines_from_end = (VISIBLE_LINES - 1 - display_line) + view_offset;
+    
+    if (lines_from_end >= scrollback_count) return -1;
+    
+    int idx = scrollback_head - lines_from_end;
+    if (idx < 0) idx += SCROLLBACK_LINES;
+    
+    return idx;
+}
+
+/* ============================================================================
+   Refresh de l'ecran
+   ============================================================================ */
+static void terminal_refresh_view(void)
+{
+    /* Affiche les lignes du scrollback dans la zone visible */
+    for (int row = 0; row < VISIBLE_LINES; row++) {
+        int screen_row = HEADER_LINES + row;
+        int buf_idx = scrollback_get_line_index(row);
+        
+        vga_clear_row(screen_row, VGA_COLOR_DEFAULT);
+        
+        if (buf_idx >= 0) {
+            char* line = scrollback_buffer[buf_idx];
+            uint8_t color = scrollback_colors[buf_idx];
+            
+            for (int col = 0; col < VGA_WIDTH && line[col]; col++) {
+                vga_put_at(screen_row, col, line[col], color);
+            }
+        }
+    }
+    
+    /* Affiche le curseur si on est en bas du scroll */
+    if (view_offset == 0) {
+        int cursor_row = HEADER_LINES + VISIBLE_LINES - 1;
+        vga_put_at(cursor_row, term_col, '_', 0x0F);
+    }
+    
+    /* Indicateur de scroll vers le haut */
+    if (view_offset > 0) {
+        const char* indicator = "^MORE";
+        for (int i = 0; i < 5; i++) {
+            vga_put_at(HEADER_LINES, VGA_WIDTH - 6 + i, indicator[i], 0x0E);
+        }
+    }
+    
+    /* Indicateur de scroll vers le bas */
+    if (scrollback_count > VISIBLE_LINES && view_offset < scrollback_count - VISIBLE_LINES) {
+        const char* indicator = "vMORE";
+        for (int i = 0; i < 5; i++) {
+            vga_put_at(VGA_HEIGHT - 1, VGA_WIDTH - 6 + i, indicator[i], 0x0E);
+        }
+    }
+}
+
+/* ============================================================================
+   Interface publique du terminal
+   ============================================================================ */
+void terminal_clear(void)
+{
+    scrollback_init();
+    
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        vga_clear_row(y, VGA_COLOR_DEFAULT);
+    }
+}
+
+void terminal_putchar(char c)
+{
+    if (c == '\n') {
+        scrollback_add_line();
+        terminal_refresh_view();
+    } else if (c == '\b') {
+        if (term_col > 0) {
+            term_col--;
+            scrollback_buffer[scrollback_head][term_col] = '\0';
+            terminal_refresh_view();
+        }
+    } else {
+        scrollback_putchar(c, VGA_COLOR_DEFAULT);
+        if (term_col >= VGA_WIDTH) {
+            scrollback_add_line();
+        }
+        terminal_refresh_view();
+    }
+}
+
+void terminal_write_at(const char* str, int row, int col)
+{
+    for (size_t i = 0; str[i]; i++) {
+        vga_put_at(row, col + i, str[i], VGA_COLOR_DEFAULT);
+    }
+}
+
+/* ============================================================================
+   NOUVEAU: Fonctions de scroll
+   ============================================================================ */
+void terminal_scroll_up(int lines)
+{
+    int max_offset = scrollback_count - VISIBLE_LINES;
+    if (max_offset < 0) max_offset = 0;
+    
+    view_offset += lines;
+    if (view_offset > max_offset) {
+        view_offset = max_offset;
+    }
+    
+    terminal_refresh_view();
+}
+
+void terminal_scroll_down(int lines)
+{
+    view_offset -= lines;
+    if (view_offset < 0) {
+        view_offset = 0;
+    }
+    
+    terminal_refresh_view();
+}
+
+void terminal_scroll_to_top(void)
+{
+    int max_offset = scrollback_count - VISIBLE_LINES;
+    if (max_offset < 0) max_offset = 0;
+    view_offset = max_offset;
+    terminal_refresh_view();
+}
+
+void terminal_scroll_to_bottom(void)
+{
+    view_offset = 0;
+    terminal_refresh_view();
+}
+
+int terminal_get_view_offset(void)
+{
+    return view_offset;
+}
+
+int terminal_get_total_lines(void)
+{
+    return scrollback_count;
+}
+
+/* ============================================================================
+   Fonctions utilitaires d'affichage
+   ============================================================================ */
+static void terminal_write_at_col(const char* str, int row, int col, uint8_t color)
+{
+    for (size_t i = 0; str[i]; i++) {
+        vga_put_at(row, col + i, str[i], color);
+    }
+}
+
+static void terminal_write_dec(uint32_t n, int row, int col)
+{
+    char buf[12]; int i = 0;
     if (n == 0) {
-        VGA_BUFFER[row * VGA_WIDTH + col] = vga_entry('0', VGA_COLOR);
-        VGA_BUFFER[row * VGA_WIDTH + col + 1] = vga_entry(' ', VGA_COLOR);
+        vga_put_at(row, col, '0', VGA_COLOR_DEFAULT);
+        vga_put_at(row, col + 1, ' ', VGA_COLOR_DEFAULT);
         return;
     }
-    char buf[32];
-    int i = 0;
     while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
-    for (int j = 0; j < i; j++) VGA_BUFFER[row * VGA_WIDTH + col + j] = vga_entry(buf[i - 1 - j], VGA_COLOR);
-    VGA_BUFFER[row * VGA_WIDTH + col + i] = vga_entry(' ', VGA_COLOR);
+    for (int j = 0; j < i; j++) {
+        vga_put_at(row, col + j, buf[i - 1 - j], VGA_COLOR_DEFAULT);
+    }
+    vga_put_at(row, col + i, ' ', VGA_COLOR_DEFAULT);
 }
 
-void task_a(void) {
-    uint32_t count = 100;
+static void draw_header(void)
+{
+    const char* title = "  RTOS x86 v2.1 | Scrollback Buffer Support  ";
+    
+    /* Row 0 - Header */
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[x] = vga_entry(' ', VGA_COLOR_HEADER);
+    }
+    terminal_write_at_col(title, 0, 0, VGA_COLOR_HEADER);
+
+    /* Row 1 - Separator */
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[VGA_WIDTH + x] = vga_entry('-', 0x08);
+    }
+
+    /* Row 2-3 - Task info */
+    terminal_write_at_col("Task A (Producer Sent) : ", 2, 0, VGA_COLOR_TASKBAR);
+    terminal_write_at_col("Task B (Consumer Recv) : ", 3, 0, VGA_COLOR_TASKBAR);
+
+    /* Row 4 - Separator */
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        VGA_BUFFER[4 * VGA_WIDTH + x] = vga_entry('-', 0x08);
+    }
+}
+
+/* ============================================================================
+   Tasks
+   ============================================================================ */
+static void task_a(void)
+{
+    uint32_t count = 0;
     while (1) {
-        queue_push_blocking(&msg_queue, count);
+        queue_push(&msg_queue, count);
         mutex_lock(&vga_mutex);
-        terminal_write_at("Task A (Producer Sent) : ", 2, 0);
-        terminal_write_dec(count++, 2, 30);
+        terminal_write_dec(count, 2, 26);
         mutex_unlock(&vga_mutex);
+        count++;
         task_sleep(50);
     }
 }
 
-void task_b(void) {
-    uint32_t received_val = 0;
+static void task_b(void)
+{
+    uint32_t val = 0;
     while (1) {
-        queue_pop_blocking(&msg_queue, &received_val); /* se réveille automatiquement, plus de polling */
-        mutex_lock(&vga_mutex);
-        terminal_write_at("Task B (Consumer Recv) : ", 3, 0);
-        terminal_write_dec(received_val, 3, 30);
-        mutex_unlock(&vga_mutex);
+        if (queue_pop(&msg_queue, &val)) {
+            mutex_lock(&vga_mutex);
+            terminal_write_dec(val, 3, 26);
+            mutex_unlock(&vga_mutex);
+        }
+        task_sleep(75);
     }
 }
 
-void task_c(void) {
-    uint32_t n = 0;
-    while (1) {
-        mutex_lock(&vga_mutex);
-        terminal_write_at("Task C (spawned)       : ", 4, 0);
-        terminal_write_dec(n++, 4, 30);
-        mutex_unlock(&vga_mutex);
-        task_sleep(70);
+static void uptime_display_cb(void)
+{
+    static uint32_t last_sec = 0;
+    uint32_t sec = get_uptime_sec();
+    if (sec == last_sec) return;
+    last_sec = sec;
+
+    char buf[16]; int i = 0;
+    uint32_t s = sec, m = s / 60, h = m / 60;
+    if (h > 0) {
+        if (h >= 10) buf[i++] = '0' + h / 10;
+        buf[i++] = '0' + h % 10;
+        buf[i++] = 'h';
+    }
+    if ((m % 60) >= 10) buf[i++] = '0' + (m % 60) / 10;
+    buf[i++] = '0' + (m % 60) % 10;
+    buf[i++] = 'm';
+    if ((s % 60) >= 10) buf[i++] = '0' + (s % 60) / 10;
+    buf[i++] = '0' + (s % 60) % 10;
+    buf[i++] = 's';
+    buf[i] = '\0';
+
+    int col = VGA_WIDTH - i - 1;
+    for (int j = 0; j < i; j++) {
+        VGA_BUFFER[VGA_WIDTH + col + j] = vga_entry(buf[j], 0x0E);
     }
 }
 
-void kernel_main(void) {
-    terminal_clear();
-    init_serial();
-    klog_init();
-    klog("RTOS booting...");
-
+/* ============================================================================
+   Kernel Main
+   ============================================================================ */
+void kernel_main(void)
+{
     init_gdt();
     init_idt();
-    init_panic_handlers();
+    terminal_clear();
+    draw_header();
+    scrollback_init();
     init_timer(100);
+    timer_register_callback(uptime_display_cb);
     init_keyboard();
     init_heap();
     vfs_init();
     mutex_init(&vga_mutex);
     queue_init(&msg_queue);
     init_tasking();
-
     create_task(task_a, 3);
     create_task(task_b, 2);
-
-    terminal_write_at("--- RTOS Preemptive Multitasking + Interactive Shell ---", 0, 0);
-    klog("Kernel init complete.");
+    process_init();
     init_shell();
-
     __asm__ __volatile__("sti");
-    while (1) { __asm__ __volatile__ ("hlt"); }
+    while (1) __asm__ __volatile__("hlt");
 }
