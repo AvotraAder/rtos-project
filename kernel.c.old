@@ -1,7 +1,7 @@
 /*
 ================================================================================
-FICHIER: kernel.c (VERSION 3.0)
-VERSION: 3.0 - Avec Logging, Paging, Signaux, Rings
+FICHIER: kernel.c
+VERSION: 2.1 - Avec support scrollback buffer
 ================================================================================
 */
 
@@ -20,14 +20,10 @@ VERSION: 3.0 - Avec Logging, Paging, Signaux, Rings
 #include "vfs.h"
 #include "syscall.h"
 #include "semaphore.h"
-#include "logging.h"
-#include "error.h"
-#include "paging.h"
-#include "signal.h"
-#include "ring.h"
 
 static uint16_t* const VGA_BUFFER = (uint16_t*)0xB8000;
 
+/* CORRIGE: Utiliser #define au lieu de const int */
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25
 
@@ -48,10 +44,6 @@ static int term_col = 0;
 
 static mutex_t vga_mutex;
 static queue_t msg_queue;
-
-/* ──────────────────────────────────────────────────────────────────
-   VGA Terminal Functions
-   ────────────────────────────────────────────────────────────────── */
 
 static inline uint16_t vga_entry(char c, uint8_t color)
 {
@@ -276,7 +268,7 @@ static void terminal_write_dec(uint32_t n, int row, int col)
 
 static void draw_header(void)
 {
-    const char* title = "  RTOS x86 v3.0 | Logging + Paging + Signals + Rings  ";
+    const char* title = "  RTOS x86 v2.1 | Scrollback Buffer Support  ";
     
     for (int x = 0; x < VGA_WIDTH; x++) {
         VGA_BUFFER[x] = vga_entry(' ', VGA_COLOR_HEADER);
@@ -350,45 +342,13 @@ static void uptime_display_cb(void)
     }
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   Point d'entrée principal du noyau
-   ────────────────────────────────────────────────────────────────── */
-
 void kernel_main(void)
 {
-    /* Initialisation de base */
     init_gdt();
     init_idt();
     terminal_clear();
     draw_header();
     scrollback_init();
-    
-    /* Nouveaux systèmes : Logging, Paging, Signaux, Rings */
-    log_init();
-    log_msg(LOG_INFO, "RTOS v3.0 démarrage");
-    
-    error_t err = paging_init();
-    if (err != E_OK) {
-        log_msg(LOG_ERROR, "Paging init échoué");
-    } else {
-        log_msg(LOG_INFO, "Paging initialisé");
-    }
-    
-    err = signal_init();
-    if (err != E_OK) {
-        log_msg(LOG_ERROR, "Signal init échoué");
-    } else {
-        log_msg(LOG_INFO, "Signaux initialisés");
-    }
-    
-    err = ring_init();
-    if (err != E_OK) {
-        log_msg(LOG_ERROR, "Ring init échoué");
-    } else {
-        log_msg(LOG_INFO, "Rings x86 initialisés");
-    }
-    
-    /* Reste de l'initialisation */
     init_timer(100);
     timer_register_callback(uptime_display_cb);
     init_keyboard();
@@ -401,11 +361,6 @@ void kernel_main(void)
     create_task(task_b, 2);
     process_init();
     init_shell();
-    
-    log_msg(LOG_INFO, "Démarrage des interruptions");
     __asm__ __volatile__("sti");
-    
-    log_msg(LOG_INFO, "Noyau prêt. CLI active.");
-    
     while (1) __asm__ __volatile__("hlt");
 }
