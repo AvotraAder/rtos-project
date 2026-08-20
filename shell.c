@@ -1,7 +1,7 @@
 /*
 ================================================================================
 FICHIER: shell.c
-VERSION: 3.1 - vmmap fonctionnel + commande shutdown
+VERSION: 3 - vmmap fonctionnel + commande shutdown
 ================================================================================
 */
 
@@ -199,7 +199,7 @@ static inline void sh_outw(uint16_t port, uint16_t val) {
 
 static void cmd_help(void)
 {
-    print_str("\n=== RTOS Shell v3.1 ===\n");
+    print_str("\n=== RTOS Shell v3.0 ===\n");
     print_str("\n  SYSTEM:\n");
     print_str("   help              - This help\n");
     print_str("   clear             - Clear the screen\n");
@@ -284,7 +284,7 @@ static void cmd_uptime(void)
 static void cmd_sysinfo(void)
 {
     print_str("\n=== RTOS System Info ===\n");
-    print_str("Version: RTOS v3.1\n");
+    print_str("Version: RTOS v3.0\n");
     print_str("Built: 2026-08-19\n");
     print_str("Tasks active: ");
     print_dec(task_count());
