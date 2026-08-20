@@ -1,7 +1,7 @@
 /*
 ================================================================================
 FICHIER: shell.c
-VERSION: 3.0 - Avec commandes avancées (logs, paging, signaux, rings)
+VERSION: 3.1 - vmmap fonctionnel + commande shutdown
 ================================================================================
 */
 
@@ -182,30 +182,43 @@ void shell_history_down(void)
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   RTOS v3.0 new commands
+   Low-level port I/O (needed for shutdown via ACPI/QEMU)
+   ────────────────────────────────────────────────────────────────── */
+
+static inline void sh_outb(uint16_t port, uint8_t val) {
+    __asm__ __volatile__ ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline void sh_outw(uint16_t port, uint16_t val) {
+    __asm__ __volatile__ ("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   RTOS v3.1 new commands
    ────────────────────────────────────────────────────────────────── */
 
 static void cmd_help(void)
 {
-    print_str("\n=== RTOS Shell v3.0 ===\n");
+    print_str("\n=== RTOS Shell v3.1 ===\n");
     print_str("\n  SYSTEM:\n");
     print_str("   help              - This help\n");
     print_str("   clear             - Clear the screen\n");
     print_str("   uptime            - Time since boot\n");
     print_str("   ticks             - Current PIT ticks\n");
     print_str("   reboot            - Reboot\n");
+    print_str("   shutdown          - Power off the system\n");
     print_str("   sysinfo           - System information\n");
     
-    print_str("\n  LOGGING (NEW v3.0):\n");
+    print_str("\n  LOGGING:\n");
     print_str("   logs              - Show the log buffer\n");
     print_str("   loglevel <0-4>    - Set the log level\n");
     print_str("   logclear          - Clear the log buffer\n");
     
-    print_str("\n  PAGING (NEW v3.0):\n");
+    print_str("\n  PAGING:\n");
     print_str("   pages             - Paging statistics\n");
-    print_str("   vmmap             - Show memory map\n");
+    print_str("   vmmap             - Show virtual memory map\n");
     
-    print_str("\n  SIGNALS & RINGS (NEW v3.0):\n");
+    print_str("\n  SIGNALS & RINGS:\n");
     print_str("   ring              - Show current Ring\n");
     print_str("   siglist           - List signals\n");
     print_str("   testsig <pid>     - Send SIGTERM to a PID\n");
@@ -271,7 +284,7 @@ static void cmd_uptime(void)
 static void cmd_sysinfo(void)
 {
     print_str("\n=== RTOS System Info ===\n");
-    print_str("Version: RTOS v3.0\n");
+    print_str("Version: RTOS v3.1\n");
     print_str("Built: 2026-08-19\n");
     print_str("Tasks active: ");
     print_dec(task_count());
@@ -317,6 +330,44 @@ static void cmd_pages(void)
     print_str("\nUsed pages: ");
     print_dec(paging_get_used_pages());
     print_str("\nFree pages: ");
+    print_dec(paging_get_free_pages());
+    print_str("\n");
+}
+
+/* ── vmmap : carte mémoire virtuelle (NOUVEAU - fonctionnel) ──────── */
+static void print_range(const char* label, uint32_t start, uint32_t end)
+{
+    print_str("  ");
+    print_str(label);
+    print_hex(start);
+    print_str(" - ");
+    print_hex(end);
+    print_str("\n");
+}
+
+static void cmd_vmmap(void)
+{
+    print_str("\n=== Virtual Memory Map ===\n");
+
+    print_range("Kernel image     : ", 0x00100000, 0x00400000);
+    print_range("Kernel heap       : ", KERNEL_HEAP_BASE, KERNEL_HEAP_BASE + (4 * 1024 * 1024));
+    print_range("Identity map      : ", 0x00000000, 0x04000000); /* 64 Mo, cf paging.c */
+    print_range("VGA text buffer   : ", 0x000B8000, 0x000B8FA0);
+    print_range("User code base    : ", USER_BASE, USER_HEAP_BASE);
+    print_range("User heap base    : ", USER_HEAP_BASE, USER_STACK_TOP);
+    print_range("User stack top    : ", USER_STACK_TOP, 0xFFFFFFFF);
+
+    print_str("\nPage tables: ");
+    print_dec(PAGE_TABLES_COUNT);
+    print_str(" x ");
+    print_dec(PAGES_PER_TABLE);
+    print_str(" entries (");
+    print_dec(PAGE_SIZE);
+    print_str(" bytes/page)\n");
+
+    print_str("Used pages : ");
+    print_dec(paging_get_used_pages());
+    print_str("   Free pages: ");
     print_dec(paging_get_free_pages());
     print_str("\n");
 }
@@ -589,6 +640,35 @@ static void cmd_reboot(void)
     );
 }
 
+/* ── shutdown : arrêt du système (NOUVEAU) ─────────────────────────
+   Tente plusieurs méthodes d'extinction connues sous QEMU/Bochs.
+   Si aucune ne fonctionne (ex: matériel réel sans ACPI configuré),
+   on se rabat sur un arrêt logiciel propre : interruptions coupées
+   et hlt en boucle (le CPU ne consomme plus de cycles utiles). */
+static void cmd_shutdown(void)
+{
+    print_str("\nShutting down...\n");
+    log_msg(LOG_INFO, "System shutdown requested");
+
+    __asm__ __volatile__("cli");
+
+    /* QEMU standard ACPI shutdown (port 0x604, valeur 0x2000) */
+    sh_outw(0x604, 0x2000);
+
+    /* QEMU/Bochs ancien style (port 0xB004, valeur 0x2000) */
+    sh_outw(0xB004, 0x2000);
+
+    /* VirtualBox */
+    sh_outw(0x4004, 0x3400);
+
+    /* Si on arrive ici, aucune méthode d'extinction n'a fonctionné */
+    print_str("Power-off not supported on this platform.\n");
+    print_str("System halted. You can now turn off the machine.\n");
+    while (1) {
+        __asm__ __volatile__("hlt");
+    }
+}
+
 static void execute_command(void)
 {
     buffer[buf_idx] = '\0';
@@ -629,6 +709,8 @@ static void execute_command(void)
         print_str("\nLogs cleared.");
     } else if (sh_strcmp(args[0], "pages") == 0) {
         cmd_pages();
+    } else if (sh_strcmp(args[0], "vmmap") == 0) {
+        cmd_vmmap();
     } else if (sh_strcmp(args[0], "ring") == 0) {
         cmd_ring();
     } else if (sh_strcmp(args[0], "siglist") == 0) {
@@ -679,6 +761,8 @@ static void execute_command(void)
         cmd_sys();
     } else if (sh_strcmp(args[0], "reboot") == 0) {
         cmd_reboot();
+    } else if (sh_strcmp(args[0], "shutdown") == 0) {
+        cmd_shutdown();
     } else {
         print_str("\nUnknown: '"); print_str(args[0]);
         print_str("'  (type 'help')");
@@ -700,7 +784,7 @@ void init_shell(void)
         command_history[i][0] = '\0';
     }
     
-    print_str("\n--- RTOS Shell v3.0 ---");
+    print_str("\n--- RTOS Shell v3.1 ---");
     print_str("\nType 'help' for help");
     print_prompt();
 }
