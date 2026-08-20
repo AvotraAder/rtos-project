@@ -24,6 +24,7 @@ VERSION: 3.0 - Avec commandes avancées (logs, paging, signaux, rings)
 extern void terminal_putchar(char c);
 extern void terminal_write_at(const char* str, int row, int col);
 extern void terminal_clear(void);
+extern void draw_header(void);
 extern void terminal_scroll_to_bottom(void);
 extern int  terminal_get_view_offset(void);
 
@@ -181,62 +182,62 @@ void shell_history_down(void)
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   Commandes RTOS v3.0
+   Nouvelles commandes RTOS v3.0
    ────────────────────────────────────────────────────────────────── */
 
 static void cmd_help(void)
 {
     print_str("\n=== RTOS Shell v3.0 ===\n");
-    print_str("\n   SYSTEME:\n");
-    print_str("    help                - Cette aide\n");
-    print_str("    clear               - Efface l'ecran\n");
-    print_str("    uptime              - Temps depuis le boot\n");
-    print_str("    ticks               - Ticks PIT courants\n");
-    print_str("    reboot              - Redemarrage\n");
-    print_str("    sysinfo             - Informations système\n");
+    print_str("\n  SYSTEME:\n");
+    print_str("   help              - Cette aide\n");
+    print_str("   clear             - Efface l'ecran\n");
+    print_str("   uptime            - Temps depuis le boot\n");
+    print_str("   ticks             - Ticks PIT courants\n");
+    print_str("   reboot            - Redemarrage\n");
+    print_str("   sysinfo           - Informations système\n");
     
-    print_str("\n   LOGGING:\n");
-    print_str("    logs                - Affiche le buffer de logs\n");
-    print_str("    loglevel <0-4>      - Définit le niveau de log\n");
-    print_str("    logclear            - Vide le buffer de logs\n");
+    print_str("\n  LOGGING (NOUVEAU v3.0):\n");
+    print_str("   logs              - Affiche le buffer de logs\n");
+    print_str("   loglevel <0-4>    - Définit le niveau de log\n");
+    print_str("   logclear          - Vide le buffer de logs\n");
     
-    print_str("\n   PAGING:\n");
-    print_str("    pages               - Stats pagination\n");
-    print_str("    vmmap               - Affiche carte mémoire\n");
+    print_str("\n  PAGING (NOUVEAU v3.0):\n");
+    print_str("   pages             - Stats pagination\n");
+    print_str("   vmmap             - Affiche carte mémoire\n");
     
-    print_str("\n   SIGNAUX & RINGS:\n");
-    print_str("    ring                - Affiche Ring actuel\n");
-    print_str("    siglist             - Liste les signaux\n");
-    print_str("    testsig <pid>       - Envoie SIGTERM à un PID\n");
+    print_str("\n  SIGNAUX & RINGS (NOUVEAU v3.0):\n");
+    print_str("   ring              - Affiche Ring actuel\n");
+    print_str("   siglist           - Liste les signaux\n");
+    print_str("   testsig <pid>     - Envoie SIGTERM à un PID\n");
     
-    print_str("\n   NAVIGATION:\n");
-    print_str("    Page Up/Down        - Defiler vers haut/bas\n");
-    print_str("    Fleche Haut/Bas     - Historique commandes\n");
+    print_str("\n  NAVIGATION:\n");
+    print_str("   Page Up/Down      - Defiler vers haut/bas\n");
+    print_str("   Fleche Haut/Bas   - Historique commandes\n");
     
-    print_str("\n   TACHES & PROCESSUS:\n");
-    print_str("    tasks               - Liste taches (scheduler)\n");
-    print_str("    ps                  - Liste processus (PCB)\n");
-    print_str("    spawn <nom>         - Cree un processus\n");
+    print_str("\n  TACHES & PROCESSUS:\n");
+    print_str("   tasks             - Liste taches (scheduler)\n");
+    print_str("   ps                - Liste processus (PCB)\n");
+    print_str("   spawn <nom>       - Cree un processus\n");
     
-    print_str("\n   MEMOIRE:\n");
-    print_str("    mem                 - Usage du tas\n");
-    print_str("    alloc [octets]      - Alloue de la memoire\n");
-    print_str("    free                - Libere la derniere alloc\n");
-    print_str("    hexdump <addr>      - Dump hex 64 octets\n");
+    print_str("\n  MEMOIRE:\n");
+    print_str("   mem               - Usage du tas\n");
+    print_str("   alloc [octets]    - Alloue de la memoire\n");
+    print_str("   free              - Libere la derniere alloc\n");
+    print_str("   hexdump <addr>    - Dump hex 64 octets\n");
     
-    print_str("\n   FICHIERS VFS:\n");
-    print_str("    ls                  - Liste les fichiers\n");
-    print_str("    cat <fichier>       - Affiche le contenu\n");
-    print_str("    touch <fichier>     - Cree un fichier vide\n");
-    print_str("    write <f> <txt>     - Ecrit dans un fichier\n");
-    print_str("    rm <fichier>        - Supprime un fichier\n");
+    print_str("\n  FICHIERS VFS:\n");
+    print_str("   ls                - Liste les fichiers\n");
+    print_str("   cat <fichier>     - Affiche le contenu\n");
+    print_str("   touch <fichier>   - Cree un fichier vide\n");
+    print_str("   write <f> <txt>   - Ecrit dans un fichier\n");
+    print_str("   rm <fichier>      - Supprime un fichier\n");
     
-    print_str("\n   DIVERS:\n");
-    print_str("    echo <texte>        - Affiche du texte\n");
-    print_str("    calc <n> <op> <m>   - Calculatrice (+ - * /)\n");
-    print_str("    sem                 - Demo semaphore\n");
-    print_str("    sys                 - Test syscalls\n");
-    print_str("    history             - Affiche l'historique\n");
+    print_str("\n  DIVERS:\n");
+    print_str("   echo <texte>      - Affiche du texte\n");
+    print_str("   calc <n> <op> <m> - Calculatrice (+ - * /)\n");
+    print_str("   sem               - Demo semaphore\n");
+    print_str("   sys               - Test syscalls\n");
+    print_str("   history           - Affiche l'historique\n");
 }
 
 static void cmd_history(void)
@@ -337,7 +338,7 @@ static void cmd_siglist(void)
     print_str("\n=== Signaux RTOS ===\n");
     print_str("SIGHUP  (1)   - Hangup\n");
     print_str("SIGINT  (2)   - Interruption (Ctrl+C)\n");
-    print_str("SIGTERM (14)  - Terminaison\n");
+    print_str("SIGTERM (15)  - Terminaison\n");
     print_str("SIGKILL (9)   - Forcé (non bloquable)\n");
     print_str("SIGUSR1 (10)  - Signal utilisateur 1\n");
     print_str("SIGUSR2 (11)  - Signal utilisateur 2\n");
@@ -612,7 +613,7 @@ static void execute_command(void)
         cmd_history();
     } else if (sh_strcmp(args[0], "clear") == 0) {
         terminal_clear();
-        terminal_write_at("--- RTOS v3.0 ---", 0, 0);
+        draw_header();
     } else if (sh_strcmp(args[0], "uptime") == 0) {
         cmd_uptime();
     } else if (sh_strcmp(args[0], "ticks") == 0) {
@@ -642,8 +643,6 @@ static void execute_command(void)
         cmd_mem();
     } else if (sh_strcmp(args[0], "alloc") == 0) {
         cmd_alloc(argc, args);
-    } else if (sh_strcmp(args[0], "spawn") == 0) {   /* <-- Fixed: Added to resolve unused cmd_spawn warning */
-        cmd_spawn(argc, args);
     } else if (sh_strcmp(args[0], "free") == 0) {
         if (!test_alloc_ptr) { print_str("\nRien a liberer."); } 
         else { kfree(test_alloc_ptr); test_alloc_ptr = 0; print_str("\nLibere."); }
@@ -700,7 +699,6 @@ void init_shell(void)
     }
     
     print_str("\n--- RTOS Shell v3.0 ---");
-    print_str("\nNouvelles fonctionnalités: Logging, Paging, Signaux, Rings");
     print_str("\nTapez 'help' pour l'aide");
     print_prompt();
 }
