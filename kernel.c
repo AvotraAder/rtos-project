@@ -32,9 +32,13 @@ static uint16_t* const VGA_BUFFER = (uint16_t*)0xB8000;
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25
 
-#define VGA_COLOR_DEFAULT 0x0F
-#define VGA_COLOR_HEADER  0x1F
-#define VGA_COLOR_TASKBAR 0x2F
+/* Thème Bleu/Vert :
+   - Corps du terminal : texte vert vif sur fond noir
+   - Header : fond bleu, texte blanc
+   - Taskbar : fond bleu, texte vert vif */
+#define VGA_COLOR_DEFAULT 0x0A   /* Noir bg / Vert vif fg */
+#define VGA_COLOR_HEADER  0x1F   /* Bleu bg / Blanc fg */
+#define VGA_COLOR_TASKBAR 0x1A   /* Bleu bg / Vert vif fg */
 
 #define SCROLLBACK_LINES  200
 #define HEADER_LINES      5
@@ -57,6 +61,22 @@ static queue_t msg_queue;
 static inline uint16_t vga_entry(char c, uint8_t color)
 {
     return (uint16_t)c | ((uint16_t)color << 8);
+}
+
+static inline void vga_outb(uint16_t port, uint8_t val)
+{
+    __asm__ __volatile__ ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+/* Le contrôleur VGA (CRTC) affiche par défaut un curseur matériel
+   clignotant, indépendant du '_' logiciel dessiné par le shell.
+   Comme le BIOS/GRUB le laisse à une position arbitraire (souvent
+   au milieu de l'écran), il apparaît comme un second curseur
+   "fantôme". On le désactive : registre CRTC 0x0A, bit 5 = disable. */
+static void vga_disable_hw_cursor(void)
+{
+    vga_outb(0x3D4, 0x0A);
+    vga_outb(0x3D5, 0x20);
 }
 
 static void vga_put_at(int row, int col, char c, uint8_t color)
@@ -275,9 +295,9 @@ static void terminal_write_dec(uint32_t n, int row, int col)
     vga_put_at(row, col + i, ' ', VGA_COLOR_DEFAULT);
 }
 
-static void draw_header(void)
+void draw_header(void)
 {
-    const char* title = "  RTOS x86 v3.0 | Logging + Paging + Signals + Rings  ";
+    const char* title = "  RTOS x86 v3.0  ";
     
     for (int x = 0; x < VGA_WIDTH; x++) {
         VGA_BUFFER[x] = vga_entry(' ', VGA_COLOR_HEADER);
@@ -370,6 +390,7 @@ void kernel_main(void)
     init_panic_handlers();
 
     terminal_clear();
+    vga_disable_hw_cursor();
     draw_header();
     scrollback_init();
     
