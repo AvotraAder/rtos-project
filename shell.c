@@ -44,7 +44,7 @@ static int   buf_idx        = 0;
 static void* test_alloc_ptr = 0;
 
 /* ──────────────────────────────────────────────────────────────────
-   Fonctions utilitaires de chaînes
+   String utility functions
    ────────────────────────────────────────────────────────────────── */
 
 static int sh_strcmp(const char* a, const char* b)
@@ -182,69 +182,69 @@ void shell_history_down(void)
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   Nouvelles commandes RTOS v3.0
+   RTOS v3.0 new commands
    ────────────────────────────────────────────────────────────────── */
 
 static void cmd_help(void)
 {
     print_str("\n=== RTOS Shell v3.0 ===\n");
-    print_str("\n  SYSTEME:\n");
-    print_str("   help              - Cette aide\n");
-    print_str("   clear             - Efface l'ecran\n");
-    print_str("   uptime            - Temps depuis le boot\n");
-    print_str("   ticks             - Ticks PIT courants\n");
-    print_str("   reboot            - Redemarrage\n");
-    print_str("   sysinfo           - Informations système\n");
+    print_str("\n  SYSTEM:\n");
+    print_str("   help              - This help\n");
+    print_str("   clear             - Clear the screen\n");
+    print_str("   uptime            - Time since boot\n");
+    print_str("   ticks             - Current PIT ticks\n");
+    print_str("   reboot            - Reboot\n");
+    print_str("   sysinfo           - System information\n");
     
-    print_str("\n  LOGGING (NOUVEAU v3.0):\n");
-    print_str("   logs              - Affiche le buffer de logs\n");
-    print_str("   loglevel <0-4>    - Définit le niveau de log\n");
-    print_str("   logclear          - Vide le buffer de logs\n");
+    print_str("\n  LOGGING (NEW v3.0):\n");
+    print_str("   logs              - Show the log buffer\n");
+    print_str("   loglevel <0-4>    - Set the log level\n");
+    print_str("   logclear          - Clear the log buffer\n");
     
-    print_str("\n  PAGING (NOUVEAU v3.0):\n");
-    print_str("   pages             - Stats pagination\n");
-    print_str("   vmmap             - Affiche carte mémoire\n");
+    print_str("\n  PAGING (NEW v3.0):\n");
+    print_str("   pages             - Paging statistics\n");
+    print_str("   vmmap             - Show memory map\n");
     
-    print_str("\n  SIGNAUX & RINGS (NOUVEAU v3.0):\n");
-    print_str("   ring              - Affiche Ring actuel\n");
-    print_str("   siglist           - Liste les signaux\n");
-    print_str("   testsig <pid>     - Envoie SIGTERM à un PID\n");
+    print_str("\n  SIGNALS & RINGS (NEW v3.0):\n");
+    print_str("   ring              - Show current Ring\n");
+    print_str("   siglist           - List signals\n");
+    print_str("   testsig <pid>     - Send SIGTERM to a PID\n");
     
     print_str("\n  NAVIGATION:\n");
-    print_str("   Page Up/Down      - Defiler vers haut/bas\n");
-    print_str("   Fleche Haut/Bas   - Historique commandes\n");
+    print_str("   Page Up/Down      - Scroll up/down\n");
+    print_str("   Up/Down Arrow     - Command history\n");
     
-    print_str("\n  TACHES & PROCESSUS:\n");
-    print_str("   tasks             - Liste taches (scheduler)\n");
-    print_str("   ps                - Liste processus (PCB)\n");
-    print_str("   spawn <nom>       - Cree un processus\n");
+    print_str("\n  TASKS & PROCESSES:\n");
+    print_str("   tasks             - List tasks (scheduler)\n");
+    print_str("   ps                - List processes (PCB)\n");
+    print_str("   spawn <name>      - Create a process\n");
     
-    print_str("\n  MEMOIRE:\n");
-    print_str("   mem               - Usage du tas\n");
-    print_str("   alloc [octets]    - Alloue de la memoire\n");
-    print_str("   free              - Libere la derniere alloc\n");
-    print_str("   hexdump <addr>    - Dump hex 64 octets\n");
+    print_str("\n  MEMORY:\n");
+    print_str("   mem               - Heap usage\n");
+    print_str("   alloc [bytes]     - Allocate memory\n");
+    print_str("   free              - Free last allocation\n");
+    print_str("   hexdump <addr>    - Hex dump 64 bytes\n");
     
-    print_str("\n  FICHIERS VFS:\n");
-    print_str("   ls                - Liste les fichiers\n");
-    print_str("   cat <fichier>     - Affiche le contenu\n");
-    print_str("   touch <fichier>   - Cree un fichier vide\n");
-    print_str("   write <f> <txt>   - Ecrit dans un fichier\n");
-    print_str("   rm <fichier>      - Supprime un fichier\n");
+    print_str("\n  VFS FILES:\n");
+    print_str("   ls                - List files\n");
+    print_str("   cat <file>        - Show file content\n");
+    print_str("   touch <file>      - Create an empty file\n");
+    print_str("   write <f> <text>  - Write to a file\n");
+    print_str("   rm <file>         - Remove a file\n");
     
-    print_str("\n  DIVERS:\n");
-    print_str("   echo <texte>      - Affiche du texte\n");
-    print_str("   calc <n> <op> <m> - Calculatrice (+ - * /)\n");
-    print_str("   sem               - Demo semaphore\n");
-    print_str("   sys               - Test syscalls\n");
-    print_str("   history           - Affiche l'historique\n");
+    print_str("\n  MISC:\n");
+    print_str("   echo <text>       - Print text\n");
+    print_str("   calc <n> <op> <m> - Calculator (+ - * /)\n");
+    print_str("   sem               - Semaphore demo\n");
+    print_str("   sys               - Syscall test\n");
+    print_str("   history           - Show command history\n");
 }
 
 static void cmd_history(void)
 {
-    print_str("\n=== Historique des commandes ===\n");
+    print_str("\n=== Command History ===\n");
     if (history_count == 0) {
-        print_str("  (vide)\n");
+        print_str("  (empty)\n");
         return;
     }
     for (int i = 0; i < history_count; i++) {
@@ -261,7 +261,7 @@ static void cmd_uptime(void)
     uint32_t s = get_uptime_sec();
     uint32_t m = s / 60;
     uint32_t h = m / 60;
-    print_str("\nUptime : ");
+    print_str("\nUptime: ");
     print_dec(h); print_str("h ");
     print_dec(m % 60); print_str("m ");
     print_dec(s % 60); print_str("s  (");
@@ -279,7 +279,7 @@ static void cmd_sysinfo(void)
     print_str("Processes: ");
     print_dec(process_count());
     print_str("\n");
-    print_str("Pages libres: ");
+    print_str("Free pages: ");
     print_dec(paging_get_free_pages());
     print_str("\n");
 }
@@ -304,19 +304,19 @@ static void cmd_loglevel(int argc, char args[MAX_ARGS][ARG_LEN])
     
     if (level >= 0 && level <= 4) {
         log_set_level((log_level_t)level);
-        print_str("\nNiveau de log changé à ");
+        print_str("\nLog level changed to ");
         print_dec(level);
     }
 }
 
 static void cmd_pages(void)
 {
-    print_str("\n=== Statistiques Paging ===\n");
-    print_str("Pages totales: ");
+    print_str("\n=== Paging Statistics ===\n");
+    print_str("Total pages: ");
     print_dec(1024 * 1024);
-    print_str("\nPages utilisées: ");
+    print_str("\nUsed pages: ");
     print_dec(paging_get_used_pages());
-    print_str("\nPages libres: ");
+    print_str("\nFree pages: ");
     print_dec(paging_get_free_pages());
     print_str("\n");
 }
@@ -324,7 +324,7 @@ static void cmd_pages(void)
 static void cmd_ring(void)
 {
     uint32_t ring = get_current_ring();
-    print_str("\nRing actuel: Ring ");
+    print_str("\nCurrent Ring: Ring ");
     print_dec(ring);
     if (ring == 0) {
         print_str(" (Kernel mode)\n");
@@ -335,13 +335,13 @@ static void cmd_ring(void)
 
 static void cmd_siglist(void)
 {
-    print_str("\n=== Signaux RTOS ===\n");
+    print_str("\n=== RTOS Signals ===\n");
     print_str("SIGHUP  (1)   - Hangup\n");
-    print_str("SIGINT  (2)   - Interruption (Ctrl+C)\n");
-    print_str("SIGTERM (15)  - Terminaison\n");
-    print_str("SIGKILL (9)   - Forcé (non bloquable)\n");
-    print_str("SIGUSR1 (10)  - Signal utilisateur 1\n");
-    print_str("SIGUSR2 (11)  - Signal utilisateur 2\n");
+    print_str("SIGINT  (2)   - Interrupt (Ctrl+C)\n");
+    print_str("SIGTERM (15)  - Termination\n");
+    print_str("SIGKILL (9)   - Forced (non-blockable)\n");
+    print_str("SIGUSR1 (10)  - User signal 1\n");
+    print_str("SIGUSR2 (11)  - User signal 2\n");
 }
 
 static void cmd_testsig(int argc, char args[MAX_ARGS][ARG_LEN])
@@ -357,9 +357,9 @@ static void cmd_testsig(int argc, char args[MAX_ARGS][ARG_LEN])
     }
     
     error_t err = kill(pid, SIGTERM);
-    print_str("\nSignal SIGTERM envoyé au PID ");
+    print_str("\nSIGTERM signal sent to PID ");
     print_dec(pid);
-    print_str(" : ");
+    print_str(": ");
     print_str(error_to_string(err));
 }
 
@@ -399,10 +399,10 @@ static void cmd_mem(void)
     size_t used  = heap_get_used();
     size_t avail = heap_get_free();
     size_t total = used + avail;
-    print_str("\nHeap total : ");
-    print_dec((uint32_t)(total / 1024)); print_str(" Ko\n");
-    print_str("  Utilise  : "); print_dec((uint32_t)used);  print_str(" octets\n");
-    print_str("  Libre    : "); print_dec((uint32_t)avail); print_str(" octets\n");
+    print_str("\nHeap total: ");
+    print_dec((uint32_t)(total / 1024)); print_str(" KB\n");
+    print_str("  Used     : "); print_dec((uint32_t)used);  print_str(" bytes\n");
+    print_str("  Free     : "); print_dec((uint32_t)avail); print_str(" bytes\n");
     uint32_t pct = total ? (uint32_t)(used * 40 / total) : 0;
     print_str("  [");
     for (uint32_t i = 0; i < 40; i++) {
@@ -416,7 +416,7 @@ static void cmd_mem(void)
 static void cmd_alloc(int argc, char args[MAX_ARGS][ARG_LEN])
 {
     if (test_alloc_ptr) {
-        print_str("\nDeja alloue ! Faites 'free' d'abord."); 
+        print_str("\nAlready allocated! Run 'free' first."); 
         return;
     }
     uint32_t sz = 1024;
@@ -429,10 +429,10 @@ static void cmd_alloc(int argc, char args[MAX_ARGS][ARG_LEN])
     }
     test_alloc_ptr = kmalloc(sz);
     if (test_alloc_ptr) {
-        print_str("\nAlloue "); print_dec(sz);
-        print_str(" octets @ "); print_hex((uint32_t)test_alloc_ptr);
+        print_str("\nAllocated "); print_dec(sz);
+        print_str(" bytes @ "); print_hex((uint32_t)test_alloc_ptr);
     } else {
-        print_str("\nEchec allocation !");
+        print_str("\nAllocation failed!");
     }
 }
 
@@ -514,11 +514,11 @@ static void cmd_calc(int argc, char args[MAX_ARGS][ARG_LEN])
             if (b == 0) { print_str("\nDiv/0!"); ok = 0; } 
             else { res = a / b; }
             break;
-        default: print_str("\nOp invalide"); ok = 0;
+        default: print_str("\nInvalid op"); ok = 0;
     }
     
     if (ok) {
-        print_str("\nResultat : ");
+        print_str("\nResult: ");
         if (res < 0) { terminal_putchar('-'); res = -res; }
         print_dec((uint32_t)res);
     }
@@ -528,7 +528,7 @@ static void cmd_sem(void)
 {
     semaphore_t s;
     sem_init(&s, 3, 3);
-    print_str("\nDemo Semaphore (max=3) :\n");
+    print_str("\nSemaphore Demo (max=3):\n");
     print_str("  Init     : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
     sem_wait(&s);
     print_str("  wait()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
@@ -538,7 +538,7 @@ static void cmd_sem(void)
     print_str("  post()   : "); print_dec((uint32_t)sem_value(&s)); print_str("\n");
     int r = sem_trywait(&s);
     print_str("  trywait(): "); 
-    print_str(r == 0 ? "ok" : "echec");
+    print_str(r == 0 ? "ok" : "failed");
     print_str(" -> "); 
     print_dec((uint32_t)sem_value(&s)); 
     print_str("\n");
@@ -549,9 +549,9 @@ static void cmd_sem(void)
 
 static void cmd_sys(void)
 {
-    print_str("\n=== Test Syscalls (int 0x80) ===\n");
+    print_str("\n=== Syscall Test (int 0x80) ===\n");
     print_str("[SYS_WRITE  ] ");
-    sys_print("Hello depuis syscall!\n");
+    sys_print("Hello from syscall!\n");
     print_str("[SYS_TICKS  ] ticks = ");
     print_dec(sys_ticks()); print_str("\n");
     print_str("[SYS_GETPID ] pid = ");
@@ -568,12 +568,12 @@ static void cmd_spawn(int argc, char args[MAX_ARGS][ARG_LEN])
     const char* name = (argc >= 2) ? args[1] : "proc";
     int pid = process_create(name, spawned_task_fn, 1, 0);
     if (pid >= 0) {
-        print_str("\nProcessus '"); 
+        print_str("\nProcess '"); 
         print_str(name);
-        print_str("' cree, PID="); 
+        print_str("' created, PID="); 
         print_dec((uint32_t)pid);
     } else {
-        print_str("\nEchec : pool plein.");
+        print_str("\nFailed: pool full.");
     }
 }
 
@@ -617,7 +617,7 @@ static void execute_command(void)
     } else if (sh_strcmp(args[0], "uptime") == 0) {
         cmd_uptime();
     } else if (sh_strcmp(args[0], "ticks") == 0) {
-        print_str("\nTicks : "); print_dec(get_ticks());
+        print_str("\nTicks: "); print_dec(get_ticks());
     } else if (sh_strcmp(args[0], "sysinfo") == 0) {
         cmd_sysinfo();
     } else if (sh_strcmp(args[0], "logs") == 0) {
@@ -626,7 +626,7 @@ static void execute_command(void)
         cmd_loglevel(argc, args);
     } else if (sh_strcmp(args[0], "logclear") == 0) {
         log_clear();
-        print_str("\nLogs vidés.");
+        print_str("\nLogs cleared.");
     } else if (sh_strcmp(args[0], "pages") == 0) {
         cmd_pages();
     } else if (sh_strcmp(args[0], "ring") == 0) {
@@ -646,8 +646,8 @@ static void execute_command(void)
     } else if (sh_strcmp(args[0], "alloc") == 0) {
         cmd_alloc(argc, args);
     } else if (sh_strcmp(args[0], "free") == 0) {
-        if (!test_alloc_ptr) { print_str("\nRien a liberer."); } 
-        else { kfree(test_alloc_ptr); test_alloc_ptr = 0; print_str("\nLibere."); }
+        if (!test_alloc_ptr) { print_str("\nNothing to free."); } 
+        else { kfree(test_alloc_ptr); test_alloc_ptr = 0; print_str("\nFreed."); }
     } else if (sh_strcmp(args[0], "hexdump") == 0) {
         if (argc < 2) {
             print_str("\nUsage: hexdump <addr>");
@@ -655,15 +655,15 @@ static void execute_command(void)
             cmd_hexdump(args[1]);
         }
     } else if (sh_strcmp(args[0], "ls") == 0) {
-        print_str("\nFichiers VFS:\n"); 
+        print_str("\nVFS Files:\n"); 
         vfs_list(print_str);
     } else if (sh_strcmp(args[0], "cat") == 0) {
         if (argc < 2) {
-            print_str("\nUsage: cat <fichier>");
+            print_str("\nUsage: cat <file>");
         } else {
             vfs_file_t* f = vfs_open(args[1]);
             if (f) { print_str("\n"); print_str(f->content); } 
-            else { print_str("\nIntrouvable: "); print_str(args[1]); }
+            else { print_str("\nNot found: "); print_str(args[1]); }
         }
     } else if (sh_strcmp(args[0], "echo") == 0) {
         print_str("\n");
@@ -680,8 +680,8 @@ static void execute_command(void)
     } else if (sh_strcmp(args[0], "reboot") == 0) {
         cmd_reboot();
     } else {
-        print_str("\nInconnu: '"); print_str(args[0]);
-        print_str("'  (tapez 'help')");
+        print_str("\nUnknown: '"); print_str(args[0]);
+        print_str("'  (type 'help')");
     }
 
     buf_idx = 0;
@@ -701,7 +701,7 @@ void init_shell(void)
     }
     
     print_str("\n--- RTOS Shell v3.0 ---");
-    print_str("\nTapez 'help' pour l'aide");
+    print_str("\nType 'help' for help");
     print_prompt();
 }
 
