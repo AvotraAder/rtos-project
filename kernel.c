@@ -32,13 +32,13 @@ static uint16_t* const VGA_BUFFER = (uint16_t*)0xB8000;
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25
 
-/* Thème Bleu/Vert :
-   - Corps du terminal : texte vert vif sur fond noir
-   - Header : fond bleu, texte blanc
-   - Taskbar : fond bleu, texte vert vif */
-#define VGA_COLOR_DEFAULT 0x0A   /* Noir bg / Vert vif fg */
-#define VGA_COLOR_HEADER  0x1F   /* Bleu bg / Blanc fg */
-#define VGA_COLOR_TASKBAR 0x1A   /* Bleu bg / Vert vif fg */
+/* Black & White theme only (no green/blue):
+   - Terminal body   : white text on black background
+   - Header          : black background, white text (with underline-like border)
+   - Taskbar         : black background, white text */
+#define VGA_COLOR_DEFAULT 0x0F   /* Black bg / White fg */
+#define VGA_COLOR_HEADER  0x0F   /* Black bg / White fg */
+#define VGA_COLOR_TASKBAR 0x0F   /* Black bg / White fg */
 
 #define SCROLLBACK_LINES  200
 #define HEADER_LINES      5
@@ -68,11 +68,11 @@ static inline void vga_outb(uint16_t port, uint8_t val)
     __asm__ __volatile__ ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-/* Le contrôleur VGA (CRTC) affiche par défaut un curseur matériel
-   clignotant, indépendant du '_' logiciel dessiné par le shell.
-   Comme le BIOS/GRUB le laisse à une position arbitraire (souvent
-   au milieu de l'écran), il apparaît comme un second curseur
-   "fantôme". On le désactive : registre CRTC 0x0A, bit 5 = disable. */
+/* The VGA controller (CRTC) shows by default a blinking hardware
+   cursor, independent of the software '_' drawn by the shell.
+   Since BIOS/GRUB leaves it at an arbitrary position (often in the
+   middle of the screen), it appears as a second "ghost" cursor.
+   We disable it here: CRTC register 0x0A, bit 5 = disable. */
 static void vga_disable_hw_cursor(void)
 {
     vga_outb(0x3D4, 0x0A);
@@ -174,14 +174,14 @@ static void terminal_refresh_view(void)
     if (view_offset > 0) {
         const char* indicator = "^MORE";
         for (int i = 0; i < 5; i++) {
-            vga_put_at(HEADER_LINES, VGA_WIDTH - 6 + i, indicator[i], 0x0E);
+            vga_put_at(HEADER_LINES, VGA_WIDTH - 6 + i, indicator[i], 0x0F);
         }
     }
     
     if (scrollback_count > VISIBLE_LINES && view_offset < scrollback_count - VISIBLE_LINES) {
         const char* indicator = "vMORE";
         for (int i = 0; i < 5; i++) {
-            vga_put_at(VGA_HEIGHT - 1, VGA_WIDTH - 6 + i, indicator[i], 0x0E);
+            vga_put_at(VGA_HEIGHT - 1, VGA_WIDTH - 6 + i, indicator[i], 0x0F);
         }
     }
 }
@@ -305,14 +305,14 @@ void draw_header(void)
     terminal_write_at_col(title, 0, 0, VGA_COLOR_HEADER);
 
     for (int x = 0; x < VGA_WIDTH; x++) {
-        VGA_BUFFER[VGA_WIDTH + x] = vga_entry('-', 0x08);
+        VGA_BUFFER[VGA_WIDTH + x] = vga_entry('-', VGA_COLOR_DEFAULT);
     }
 
     terminal_write_at_col("Task A (Producer Sent) : ", 2, 0, VGA_COLOR_TASKBAR);
     terminal_write_at_col("Task B (Consumer Recv) : ", 3, 0, VGA_COLOR_TASKBAR);
 
     for (int x = 0; x < VGA_WIDTH; x++) {
-        VGA_BUFFER[4 * VGA_WIDTH + x] = vga_entry('-', 0x08);
+        VGA_BUFFER[4 * VGA_WIDTH + x] = vga_entry('-', VGA_COLOR_DEFAULT);
     }
 }
 
@@ -367,26 +367,26 @@ static void uptime_display_cb(void)
 
     int col = VGA_WIDTH - i - 1;
     for (int j = 0; j < i; j++) {
-        VGA_BUFFER[VGA_WIDTH + col + j] = vga_entry(buf[j], 0x0E);
+        VGA_BUFFER[VGA_WIDTH + col + j] = vga_entry(buf[j], VGA_COLOR_DEFAULT);
     }
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   Point d'entrée principal du noyau
+   Kernel main entry point
    ────────────────────────────────────────────────────────────────── */
 
 void kernel_main(void)
 {
-    /* Initialisation de base */
+    /* Base initialization */
     init_gdt();
     init_idt();
 
-    /* IMPORTANT : enregistrer les handlers de panic AVANT tout
-       sous-système risqué (paging, ring). Sans ça, une exception
-       CPU (#GP, #PF, ...) est silencieusement ré-exécutée en boucle
-       infinie par l'ISR par défaut, et l'écran reste figé sans
-       aucun message. Avec ces handlers, une faute affiche un écran
-       de panic exploitable au lieu de freezer sans explication. */
+    /* IMPORTANT: register panic handlers BEFORE any risky subsystem
+       (paging, ring). Without this, a CPU exception (#GP, #PF, ...)
+       is silently re-executed in an infinite loop by the default
+       ISR, and the screen stays frozen with no message. With these
+       handlers, a fault shows a usable panic screen instead of
+       freezing without explanation. */
     init_panic_handlers();
 
     terminal_clear();
@@ -394,32 +394,32 @@ void kernel_main(void)
     draw_header();
     scrollback_init();
     
-    /* Nouveaux systèmes : Logging, Paging, Signaux, Rings */
+    /* New subsystems: Logging, Paging, Signals, Rings */
     log_init();
-    log_msg(LOG_INFO, "RTOS v3.0 démarrage");
+    log_msg(LOG_INFO, "RTOS v3.0 starting");
     
     error_t err = paging_init();
     if (err != E_OK) {
-        log_msg(LOG_ERROR, "Paging init échoué");
+        log_msg(LOG_ERROR, "Paging init failed");
     } else {
-        log_msg(LOG_INFO, "Paging initialisé");
+        log_msg(LOG_INFO, "Paging initialized");
     }
     
     err = signal_init();
     if (err != E_OK) {
-        log_msg(LOG_ERROR, "Signal init échoué");
+        log_msg(LOG_ERROR, "Signal init failed");
     } else {
-        log_msg(LOG_INFO, "Signaux initialisés");
+        log_msg(LOG_INFO, "Signals initialized");
     }
     
     err = ring_init();
     if (err != E_OK) {
-        log_msg(LOG_ERROR, "Ring init échoué");
+        log_msg(LOG_ERROR, "Ring init failed");
     } else {
-        log_msg(LOG_INFO, "Rings x86 initialisés");
+        log_msg(LOG_INFO, "x86 Rings initialized");
     }
     
-    /* Reste de l'initialisation */
+    /* Remaining initialization */
     init_timer(100);
     timer_register_callback(uptime_display_cb);
     init_keyboard();
@@ -433,10 +433,10 @@ void kernel_main(void)
     process_init();
     init_shell();
     
-    log_msg(LOG_INFO, "Démarrage des interruptions");
+    log_msg(LOG_INFO, "Enabling interrupts");
     __asm__ __volatile__("sti");
     
-    log_msg(LOG_INFO, "Noyau prêt. CLI active.");
+    log_msg(LOG_INFO, "Kernel ready. CLI active.");
     
     while (1) __asm__ __volatile__("hlt");
 }
