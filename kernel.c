@@ -25,6 +25,7 @@ VERSION: 3.0 - Avec Logging, Paging, Signaux, Rings
 #include "paging.h"
 #include "signal.h"
 #include "ring.h"
+#include "panic.h"
 
 static uint16_t* const VGA_BUFFER = (uint16_t*)0xB8000;
 
@@ -359,6 +360,15 @@ void kernel_main(void)
     /* Initialisation de base */
     init_gdt();
     init_idt();
+
+    /* IMPORTANT : enregistrer les handlers de panic AVANT tout
+       sous-système risqué (paging, ring). Sans ça, une exception
+       CPU (#GP, #PF, ...) est silencieusement ré-exécutée en boucle
+       infinie par l'ISR par défaut, et l'écran reste figé sans
+       aucun message. Avec ces handlers, une faute affiche un écran
+       de panic exploitable au lieu de freezer sans explication. */
+    init_panic_handlers();
+
     terminal_clear();
     draw_header();
     scrollback_init();

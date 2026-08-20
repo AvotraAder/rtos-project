@@ -15,18 +15,16 @@ static uint32_t tss_selector = 0;
 
 static void setup_tss(tss_t* tss)
 {
-    uint8_t* ptr = (uint8_t*)tss;
-    for (unsigned int i = 0; i < sizeof(tss_t); i++) {
-        ptr[i] = 0;
+    for (size_t i = 0; i < sizeof(tss_t); i++) {
+        ((uint8_t*)tss)[i] = 0;
     }
     
-    /* Stack Ring 0 (noyau) - utilisé lorsque le CPU passe de Ring 3 à Ring 0 */
+    /* Stack Ring 0 (noyau) : seul champ utilisé lors d'un switch
+       Ring3 -> Ring0 (interruption/syscall). Le x86 n'a pas de champ
+       esp3/ss3 dans le TSS : la pile Ring3 est chargée manuellement
+       par switch_to_ring3() via l'image iret. */
     tss->esp0 = 0x00400000;  /* Base noyau */
     tss->ss0 = 0x10;         /* Data segment Ring 0 */
-    
-    /* Note: Pas de champs esp3/ss3 dans la structure TSS matérielle x86. 
-     * Le processeur récupère automatiquement le stack utilisateur depuis 
-     * la pile d'interruption lors d'un 'iret'. */
     
     /* CR3 (Page directory) */
     tss->cr3 = 0;
@@ -44,6 +42,7 @@ static void setup_tss(tss_t* tss)
     
     /* I/O Map base */
     tss->iomap_base = sizeof(tss_t);
+    tss->trap = 0;
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -56,8 +55,12 @@ error_t ring_init(void)
     
     setup_tss(&kernel_tss);
     
-    /* Charger le TSS via LTR (Load Task Register) */
-    tss_selector = 0x28;  /* TSS selector (assume GDT entry 5) */
+    /* IMPORTANT : le descripteur TSS doit exister dans le GDT AVANT
+       le ltr, sinon le CPU génère un #GP en boucle (le GDT de base
+       n'a que 3 entrées : Nul, CodeR0, DataR0). */
+    gdt_set_tss((uint32_t)&kernel_tss, sizeof(tss_t) - 1);
+    
+    tss_selector = 0x28;  /* Sélecteur GDT entrée 5 */
     
     __asm__ __volatile__ (
         "ltr %0"
@@ -115,6 +118,7 @@ error_t switch_to_ring3(void (*user_entry)(void), uint32_t arg1, uint32_t arg2)
 void switch_to_ring0(void)
 {
     /* Appelé automatiquement lors d'une interruption/syscall */
+    /* Pas besoin d'action - le CPU fait le switch automatiquement */
 }
 
 uint32_t get_current_ring(void)

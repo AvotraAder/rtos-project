@@ -13,29 +13,30 @@ KERNEL  = $(BUILD)/kernel.bin
 ISO     = rtos.iso
 
 # ── Objets ────────────────────────────────────────────────────────
-OBJS =  $(BUILD)/boot.o         \
-        $(BUILD)/gdt_flush.o    \
-        $(BUILD)/interrupts.o   \
-        $(BUILD)/gdt.o          \
-        $(BUILD)/idt.o          \
-        $(BUILD)/timer.o        \
-        $(BUILD)/task.o         \
-        $(BUILD)/process.o      \
-        $(BUILD)/keyboard.o     \
-        $(BUILD)/mutex.o        \
-        $(BUILD)/semaphore.o    \
-        $(BUILD)/queue.o        \
-        $(BUILD)/heap.o         \
-        $(BUILD)/vfs.o          \
-        $(BUILD)/syscall.o      \
-        $(BUILD)/shell.o        \
-        $(BUILD)/kernel.o       \
-        $(BUILD)/error.o        \
-        $(BUILD)/logging.o      \
-        $(BUILD)/paging.o       \
-        $(BUILD)/signal.o       \
-        $(BUILD)/pipe.o         \
-        $(BUILD)/ring.o         \
+OBJS =  $(BUILD)/boot.o           \
+        $(BUILD)/gdt_flush.o      \
+        $(BUILD)/interrupts.o     \
+        $(BUILD)/gdt.o            \
+        $(BUILD)/idt.o            \
+        $(BUILD)/timer.o          \
+        $(BUILD)/task.o           \
+        $(BUILD)/process.o        \
+        $(BUILD)/keyboard.o       \
+        $(BUILD)/mutex.o          \
+        $(BUILD)/semaphore.o      \
+        $(BUILD)/queue.o          \
+        $(BUILD)/heap.o           \
+        $(BUILD)/vfs.o            \
+        $(BUILD)/syscall.o        \
+        $(BUILD)/shell.o          \
+        $(BUILD)/kernel.o         \
+        $(BUILD)/panic.o          \
+        $(BUILD)/error.o          \
+        $(BUILD)/logging.o        \
+        $(BUILD)/paging.o         \
+        $(BUILD)/signal.o         \
+        $(BUILD)/pipe.o           \
+        $(BUILD)/ring.o           \
         $(BUILD)/serial.o
 
 .PHONY: all clean run iso run-iso
@@ -65,13 +66,13 @@ $(KERNEL): $(OBJS) linker.ld
 	$(LD) -T linker.ld -o $@ $(LDFLAGS) $(OBJS)
 	@echo ""
 	@echo "  ╔══════════════════════════════════╗"
-	@echo "  ║  RTOS v3.0 kernel.bin compilé    ║"
-	@echo "  ║  Avec: Logging, Paging,          ║"
-	@echo "  ║        Signaux, Rings, IPC       ║"
+	@echo "  ║  RTOS v3.0 kernel.bin compilé   ║"
+	@echo "  ║  Avec: Logging, Paging,         ║"
+	@echo "  ║        Signaux, Rings, IPC      ║"
 	@echo "  ╚══════════════════════════════════╝"
 	@echo ""
 
-# ── Exécution ────────────────────────────────────────────────     
+# ── Exécution ─────────────────────────────────────────────────────
 run: $(KERNEL)
 	qemu-system-i386 -kernel $(KERNEL) \
 	    -serial stdio \
