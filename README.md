@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**A hobby x86 (i686) kernel built from the ground up in C and Assembly**
+**(i686) kernel built from the ground up in C and Assembly**
 
 ![Architecture](https://img.shields.io/badge/arch-i686-blue)
 ![Language](https://img.shields.io/badge/language-C%20%2F%20NASM-orange)
