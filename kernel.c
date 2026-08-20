@@ -1,7 +1,7 @@
 /*
 ================================================================================
-FICHIER: kernel.c (VERSION 3.0)
-VERSION: 3.0 - Avec Logging, Paging, Signaux, Rings
+FICHIER: kernel.c (VERSION 3.1)
+VERSION: 3.1 - Avec Logging, Paging, Signaux, Rings
 ================================================================================
 */
 
@@ -297,7 +297,7 @@ static void terminal_write_dec(uint32_t n, int row, int col)
 
 void draw_header(void)
 {
-    const char* title = "  RTOS x86 v3.0  ";
+    const char* title = "  RTOS x86 v3.1  ";
     
     for (int x = 0; x < VGA_WIDTH; x++) {
         VGA_BUFFER[x] = vga_entry(' ', VGA_COLOR_HEADER);
@@ -396,7 +396,7 @@ void kernel_main(void)
     
     /* New subsystems: Logging, Paging, Signals, Rings */
     log_init();
-    log_msg(LOG_INFO, "RTOS v3.0 starting");
+    log_msg(LOG_INFO, "RTOS v3.1 starting");
     
     error_t err = paging_init();
     if (err != E_OK) {
