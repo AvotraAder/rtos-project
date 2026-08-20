@@ -639,6 +639,8 @@ static void execute_command(void)
         cmd_tasks();
     } else if (sh_strcmp(args[0], "ps") == 0) {
         cmd_ps();
+    } else if (sh_strcmp(args[0], "spawn") == 0) {
+        cmd_spawn(argc, args);
     } else if (sh_strcmp(args[0], "mem") == 0) {
         cmd_mem();
     } else if (sh_strcmp(args[0], "alloc") == 0) {
